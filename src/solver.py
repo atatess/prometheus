@@ -11,13 +11,13 @@ from typing import Optional
 from .proposer import Problem
 
 
-SOLVER_PROMPT = """You are solving a problem. Think step by step, then provide your final answer.
+SOLVER_PROMPT = """Solve this problem. Give your final answer as a single number.
 
 {problem_prompt}
 
 {format_hint}
 
-Think carefully and show your work. Put your final answer in the format requested.
+Put your final answer after "ANSWER: " on its own line.
 """
 
 CODE_SOLVER_PROMPT = """You are solving a coding problem. Write a Python function that solves it.
@@ -62,11 +62,35 @@ def parse_solution(raw_response: str, domain: str) -> Solution:
     if "<think>" in text and "</think>" in text:
         text = text.split("</think>")[-1].strip()
     elif "<think>" in text:
-        # Thinking didn't close — try to find answer after thinking markers
-        pass
+        # Thinking didn't close — try to find answer in text
+        import re
+        # Look for ANSWER: pattern
+        match = re.search(r'ANSWER:\s*(.+)', text)
+        if match:
+            text = match.group(1).strip()
+        else:
+            # Find last number in the text
+            numbers = re.findall(r'-?\d+\.?\d*', text)
+            if numbers:
+                text = numbers[-1]
     
-    # Try to extract a boxed answer (common in math)
+    # Try to extract answer from common patterns
     answer = text
+    
+    # Pattern 1: "ANSWER: X"
+    import re
+    answer_match = re.search(r'ANSWER:\s*(.+?)(?:\n|$)', text)
+    if answer_match:
+        answer = answer_match.group(1).strip()
+        return Solution(raw_response=raw_response, answer=answer)
+    
+    # Pattern 2: "The answer is X"
+    answer_match = re.search(r'[Tt]he (?:final )?answer is[:\s]*([^\n.]+)', text)
+    if answer_match:
+        answer = answer_match.group(1).strip().rstrip('.')
+        return Solution(raw_response=raw_response, answer=answer)
+    
+    # Pattern 3: boxed answer (common in math)
     if "\\boxed{" in text:
         try:
             start = text.index("\\boxed{") + 7
@@ -99,8 +123,14 @@ def parse_solution(raw_response: str, domain: str) -> Solution:
     if domain == "code" and code:
         answer = code
     
+    # Fallback: extract last number from text (for math)
+    if domain == "math" and answer == text:
+        numbers = re.findall(r'-?\d+\.?\d*', text)
+        if numbers:
+            answer = numbers[-1]
+    
     return Solution(
-        raw_response=text,
+        raw_response=raw_response,
         answer=answer,
         code=code,
     )

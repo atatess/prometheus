@@ -1,8 +1,8 @@
 """
 Prometheus Training Loop — Self-Play via GRPO on MLX.
 
-This is the file that gets modified by the meta-agent (autoresearch outer loop).
-It contains the core training loop: generate problems → solve → verify → train.
+Core loop: generate problems → solve → verify → GRPO train.
+This file can be modified by the meta-agent (autoresearch outer loop).
 """
 
 import argparse
@@ -15,10 +15,10 @@ try:
 except ImportError:
     import tomli as tomllib
 
-import mlx.core as mx
 from mlx_lm import load
 
-from src.grpo import GRPOConfig, GRPOTrainer, generate_rollouts
+from src.grpo import GRPOConfig, GRPOTrainer
+from src.model_utils import chat_generate, strip_thinking
 from src.proposer import build_proposer_prompt, parse_proposed_problem
 from src.solver import build_solver_prompt, parse_solution
 from src.verifier import verify_code_task, verify_math, SandboxConfig
@@ -26,7 +26,6 @@ from src.curriculum import Curriculum, CurriculumConfig
 
 
 def load_config(config_path: str) -> dict:
-    """Load TOML configuration."""
     with open(config_path, "rb") as f:
         return tomllib.load(f)
 
@@ -42,19 +41,21 @@ def run_experiment(config: dict, experiment_dir: Path):
     model_name = config["model"]["name"]
     print(f"\n📦 Loading model: {model_name}")
     model, tokenizer = load(model_name)
+    print(f"✅ Model loaded")
     
     # --- Setup GRPO ---
     grpo_config = GRPOConfig(
         group_size=config["training"]["group_size"],
         learning_rate=config["training"]["learning_rate"],
-        max_new_tokens=config["training"]["max_new_tokens"],
-        lora_rank=config["model"].get("lora_rank", 16),
-        lora_alpha=config["model"].get("lora_alpha", 32),
-        lora_targets=config["model"].get("lora_targets", ["q_proj", "v_proj", "k_proj", "o_proj"]),
+        max_new_tokens=config["training"].get("max_new_tokens", 2000),
         max_seq_len=config["training"].get("max_seq_len", 2048),
+        gradient_accumulation_steps=config["training"].get("grad_accumulation_steps", 4),
     )
     
-    trainer = GRPOTrainer(model, tokenizer, grpo_config)
+    time_budget = config["training"]["time_budget_minutes"] * 60
+    estimated_steps = max(10, int(time_budget / 30))  # ~30s per step
+    trainer = GRPOTrainer(model, tokenizer, grpo_config, total_steps=estimated_steps)
+    print(f"✅ GRPO trainer initialized (3 model copies)")
     
     # --- Setup Curriculum ---
     curriculum_config = CurriculumConfig(
@@ -64,11 +65,9 @@ def run_experiment(config: dict, experiment_dir: Path):
     )
     curriculum = Curriculum(curriculum_config)
     
-    # Load existing curriculum state if available
     curriculum_path = experiment_dir / "curriculum_state.json"
     if curriculum_path.exists():
         curriculum.load(str(curriculum_path))
-        print(f"📚 Loaded curriculum state: {curriculum.get_status()}")
     
     # --- Setup Sandbox ---
     sandbox_config = SandboxConfig(
@@ -77,12 +76,12 @@ def run_experiment(config: dict, experiment_dir: Path):
     )
     
     # --- Training Loop ---
-    time_budget = config["training"]["time_budget_minutes"] * 60
     start_time = time.monotonic()
     step = 0
     total_correct = 0
     total_attempts = 0
     losses = []
+    train_steps_done = 0
     
     print(f"\n⏱️  Time budget: {config['training']['time_budget_minutes']} minutes")
     print(f"🎯 Domains: {curriculum.domains}")
@@ -94,7 +93,7 @@ def run_experiment(config: dict, experiment_dir: Path):
         elapsed = time.monotonic() - start_time
         remaining = time_budget - elapsed
         
-        print(f"--- Step {step} | {elapsed:.0f}s elapsed | {remaining:.0f}s remaining ---")
+        print(f"\n--- Step {step} | {elapsed:.0f}s elapsed | {remaining:.0f}s remaining ---")
         
         # 1. Select domain and difficulty
         domain = curriculum.select_domain()
@@ -107,7 +106,7 @@ def run_experiment(config: dict, experiment_dir: Path):
         
         # 2. Generate a problem (Proposer)
         proposer_prompt = build_proposer_prompt(domain, difficulty)
-        raw_problem = generate_rollouts(model, tokenizer, proposer_prompt, grpo_config)[0]
+        raw_problem = chat_generate(model, tokenizer, proposer_prompt, max_tokens=2000)
         problem = parse_proposed_problem(domain, raw_problem)
         
         if problem is None:
@@ -118,8 +117,11 @@ def run_experiment(config: dict, experiment_dir: Path):
         
         # 3. Generate solutions (Solver) — multiple rollouts for GRPO
         solver_prompt = build_solver_prompt(problem)
-        responses = generate_rollouts(model, tokenizer, solver_prompt, grpo_config)
-        solutions = [parse_solution(r, domain) for r in responses]
+        responses = trainer.generate_rollouts(solver_prompt)
+        
+        # Strip thinking from responses for answer extraction
+        clean_responses = [strip_thinking(r) for r in responses]
+        solutions = [parse_solution(r, domain) for r in clean_responses]
         
         # 4. Verify each solution
         rewards = []
@@ -145,22 +147,21 @@ def run_experiment(config: dict, experiment_dir: Path):
         curriculum.record_attempt(domain, any(r > 0 for r in rewards))
         
         accuracy = sum(rewards) / len(rewards)
-        print(f"  ✅ Rollout accuracy: {accuracy:.1%} ({sum(rewards):.0f}/{len(rewards)})")
+        print(f"  ✅ Rollout accuracy: {accuracy:.1%} ({int(sum(rewards))}/{len(rewards)})")
         
-        # 5. GRPO training step (only if we have signal)
+        # 5. GRPO training step
         if sum(rewards) > 0 and sum(rewards) < len(rewards):
             # Need both positive and negative examples for GRPO
-            loss = trainer.train_step(
-                [solver_prompt],
-                [rewards],
-                [responses],
-            )
+            loss = trainer.train_step(solver_prompt, responses, rewards)
             losses.append(loss)
-            print(f"  📉 Loss: {loss:.4f}")
+            train_steps_done += 1
+            print(f"  📉 GRPO Loss: {loss:.4f}")
+        elif sum(rewards) == len(rewards):
+            print(f"  ⏭️  All correct — too easy, no training signal")
         else:
-            print(f"  ⏭️  Skipping train step (all same reward)")
+            print(f"  ⏭️  All wrong — too hard, no training signal")
         
-        # Check time
+        # Time check
         if (time.monotonic() - start_time) > time_budget * 0.95:
             print(f"\n⏰ Time budget nearly exhausted, stopping.")
             break
@@ -172,29 +173,28 @@ def run_experiment(config: dict, experiment_dir: Path):
     
     results = {
         "steps": step,
+        "train_steps": train_steps_done,
         "elapsed_seconds": elapsed_total,
         "total_attempts": total_attempts,
         "total_correct": total_correct,
         "overall_accuracy": overall_accuracy,
         "avg_loss": avg_loss,
+        "losses": losses,
         "curriculum_status": curriculum.get_status(),
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     
-    # Save experiment results
     results_path = experiment_dir / "results.json"
     results_path.write_text(json.dumps(results, indent=2))
     
-    # Save curriculum state
     curriculum.save(str(curriculum_path))
     
-    # Save LoRA checkpoint
-    checkpoint_path = experiment_dir / "lora_weights.npz"
+    checkpoint_path = experiment_dir / "checkpoint.npz"
     trainer.save_checkpoint(str(checkpoint_path))
     
     print(f"\n{'=' * 60}")
     print(f"🏁 Experiment Complete")
-    print(f"   Steps: {step}")
+    print(f"   Steps: {step} ({train_steps_done} training updates)")
     print(f"   Time: {elapsed_total:.1f}s")
     print(f"   Accuracy: {overall_accuracy:.1%}")
     print(f"   Avg Loss: {avg_loss:.4f}")
@@ -206,26 +206,18 @@ def run_experiment(config: dict, experiment_dir: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Prometheus Self-Play Training")
-    parser.add_argument(
-        "--config", type=str, default="configs/default.toml",
-        help="Path to TOML config file",
-    )
-    parser.add_argument(
-        "--experiment-dir", type=str, default=None,
-        help="Directory for experiment outputs",
-    )
+    parser.add_argument("--config", type=str, default="configs/default.toml")
+    parser.add_argument("--experiment-dir", type=str, default=None)
     args = parser.parse_args()
     
     config = load_config(args.config)
     
-    # Create experiment directory
     if args.experiment_dir:
         exp_dir = Path(args.experiment_dir)
     else:
         exp_dir = Path("experiments") / time.strftime("%Y%m%d_%H%M%S")
     exp_dir.mkdir(parents=True, exist_ok=True)
     
-    # Save config for reproducibility
     (exp_dir / "config.json").write_text(json.dumps(config, indent=2))
     
     run_experiment(config, exp_dir)

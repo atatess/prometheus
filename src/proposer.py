@@ -25,12 +25,16 @@ class Problem:
 
 # --- Prompt Templates ---
 
-MATH_PROPOSER_PROMPT = """Generate a {difficulty} math problem about {topic}. The answer must be a single number.
+MATH_PROPOSER_PROMPT = """Create a {difficulty} math problem about {topic}.
 
-Reply with ONLY valid JSON in this exact format:
-{{"prompt": "your math question here", "problem_code": "expected = YOUR_NUMERIC_ANSWER", "test_code": "assert str(student_answer).strip() == str(expected).strip()", "expected_answer": "YOUR_NUMERIC_ANSWER"}}
+Rules:
+- The answer MUST be a single integer or simple number
+- The problem must be solvable in 1-3 steps
 
-DO NOT use 42 as the answer. Generate a REAL problem with the correct answer.
+Reply with ONLY this JSON (replace ALL placeholder values):
+{{"prompt": "What is 15 + 27?", "expected_answer": "42"}}
+
+IMPORTANT: Do NOT copy my example. Create a DIFFERENT problem about {topic}.
 """
 
 CODE_PROPOSER_PROMPT = """You are a coding challenge generator. Generate a Python programming
@@ -124,12 +128,17 @@ def parse_proposed_problem(domain: str, raw_output: str) -> Optional[Problem]:
 
         data = json.loads(text)
 
+        # Validate — reject template copies
+        prompt = data.get("prompt", "")
+        if "your math question" in prompt.lower() or "your question" in prompt.lower():
+            return None
+
         return Problem(
             domain=domain,
             difficulty=data.get("difficulty", "medium"),
-            prompt=data["prompt"],
-            problem_code=data["problem_code"],
-            test_code=data["test_code"],
+            prompt=prompt,
+            problem_code=data.get("problem_code", f"expected = {data.get('expected_answer', '')}"),
+            test_code=data.get("test_code", "assert str(student_answer).strip() == str(expected).strip()"),
             metadata=data,
         )
     except (json.JSONDecodeError, KeyError) as e:

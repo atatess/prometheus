@@ -1,214 +1,247 @@
 """
-GRPO (Group Relative Policy Optimization) implementation for MLX.
+GRPO (Group Relative Policy Optimization) for MLX.
 
-Based on DeepSeek-R1's approach: generate multiple rollouts per prompt,
-compute relative advantages within each group, update toward higher-reward responses.
+Based on DeepSeek-R1's approach adapted from Doriandarko/MLX-GRPO.
+Three models: trainable policy (π_θ), frozen rollout policy (π_old), frozen reference (π_ref).
 """
+
+import copy
+import math
+from dataclasses import dataclass, field
+from typing import Optional
 
 import mlx.core as mx
 import mlx.nn as nn
-import mlx.optimizers as optim
+from mlx.optimizers import Adam, cosine_decay
+from mlx.utils import tree_flatten, tree_map
 from mlx_lm import load, generate
 from mlx_lm.sample_utils import make_sampler
-from mlx_lm.tuner.lora import LoRALinear
-from dataclasses import dataclass
-from typing import Optional
-import math
-import json
-import time
+
+from .model_utils import strip_thinking
 
 
 @dataclass
 class GRPOConfig:
     """Configuration for GRPO training."""
     group_size: int = 4
-    learning_rate: float = 5e-6
-    weight_decay: float = 0.01
-    max_new_tokens: int = 512
-    temperature: float = 0.8
+    learning_rate: float = 1e-6
+    weight_decay: float = 0.0
+    max_new_tokens: int = 2000  # High for thinking models
+    temperature: float = 0.7
     kl_coeff: float = 0.04
-    clip_range: float = 0.2
-    lora_rank: int = 16
-    lora_alpha: int = 32
-    lora_targets: list = None
-    grad_accumulation_steps: int = 4
+    clip_eps: float = 0.2
     max_seq_len: int = 2048
-
-    def __post_init__(self):
-        if self.lora_targets is None:
-            self.lora_targets = ["q_proj", "v_proj", "k_proj", "o_proj"]
-
-
-def apply_lora(model, config: GRPOConfig):
-    """Apply LoRA adapters to the model."""
-    lora_params = {}
-    for name, module in model.named_modules():
-        if any(target in name for target in config.lora_targets):
-            if isinstance(module, nn.Linear):
-                lora_layer = LoRALinear.from_linear(
-                    module,
-                    r=config.lora_rank,
-                    alpha=config.lora_alpha,
-                )
-                # Set the LoRA layer in the model
-                parts = name.split(".")
-                parent = model
-                for part in parts[:-1]:
-                    parent = getattr(parent, part)
-                setattr(parent, parts[-1], lora_layer)
-                lora_params[name] = lora_layer
-    return lora_params
+    gradient_accumulation_steps: int = 4
+    max_grad_norm: float = 0.1
+    warmup_ratio: float = 0.1
 
 
-def compute_grpo_loss(
-    model,
-    tokenizer,
-    prompts: list[str],
-    rewards: list[list[float]],
-    responses: list[list[str]],
-    config: GRPOConfig,
-) -> mx.array:
-    """
-    Compute GRPO loss for a batch of prompts.
+def calculate_log_probs(model, tokenizer, prompt: str, completion: str) -> mx.array:
+    """Compute log p(completion | prompt) for a single sample.
     
-    For each prompt, we have `group_size` responses with corresponding rewards.
-    The advantage is computed relative to the group mean (no critic needed).
+    Feeds prompt + completion through model, extracts log probs
+    for completion tokens only.
     """
-    total_loss = mx.array(0.0)
-    n_samples = 0
-
-    for prompt, group_rewards, group_responses in zip(prompts, rewards, responses):
-        # Compute group-relative advantages
-        mean_reward = sum(group_rewards) / len(group_rewards)
-        std_reward = max(
-            math.sqrt(sum((r - mean_reward) ** 2 for r in group_rewards) / len(group_rewards)),
-            1e-8,
-        )
-        advantages = [(r - mean_reward) / std_reward for r in group_rewards]
-
-        for response, advantage in zip(group_responses, advantages):
-            if advantage <= 0:
-                continue  # Only train on above-average responses
-
-            # Tokenize the full sequence
-            full_text = prompt + response
-            tokens = tokenizer.encode(full_text)
-            if len(tokens) > config.max_seq_len:
-                tokens = tokens[: config.max_seq_len]
-
-            input_ids = mx.array([tokens[:-1]])
-            target_ids = mx.array([tokens[1:]])
-
-            # Forward pass
-            logits = model(input_ids)
-            
-            # Cross-entropy loss on response tokens only
-            prompt_len = len(tokenizer.encode(prompt))
-            log_probs = nn.losses.cross_entropy(
-                logits[:, prompt_len - 1 :, :].reshape(-1, logits.shape[-1]),
-                target_ids[:, prompt_len - 1 :].reshape(-1),
-                reduction="mean",
-            )
-
-            # Weight by advantage
-            total_loss = total_loss + log_probs * mx.array(advantage)
-            n_samples += 1
-
-    if n_samples > 0:
-        total_loss = total_loss / n_samples
-
-    return total_loss
+    prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
+    completion_tokens = tokenizer.encode(completion, add_special_tokens=False)
+    
+    full_tokens = prompt_tokens + completion_tokens
+    input_ids = mx.array(full_tokens, dtype=mx.int32)[None, :]
+    
+    # Forward pass
+    logits = model(input_ids)
+    log_probs_full = nn.log_softmax(logits, axis=-1)
+    
+    # Extract log probs for completion tokens only
+    prompt_len = len(prompt_tokens)
+    completion_len = len(completion_tokens)
+    
+    completion_log_probs = []
+    for i in range(completion_len):
+        pos = prompt_len - 1 + i
+        if pos < len(full_tokens) - 1:
+            next_token_id = full_tokens[pos + 1]
+            log_prob = log_probs_full[0, pos, next_token_id]
+            completion_log_probs.append(log_prob)
+    
+    if len(completion_log_probs) > 0:
+        return mx.sum(mx.stack(completion_log_probs))
+    else:
+        return mx.array(0.0)
 
 
-def generate_rollouts(
-    model,
-    tokenizer,
-    prompt: str,
-    config: GRPOConfig,
-) -> list[str]:
-    """Generate multiple rollout responses for a prompt."""
-    sampler = make_sampler(temp=config.temperature)
-    responses = []
-    for _ in range(config.group_size):
-        response = generate(
-            model,
-            tokenizer,
-            prompt=prompt,
-            max_tokens=config.max_new_tokens,
-            sampler=sampler,
-        )
-        responses.append(response)
-    return responses
+def grpo_loss_single(model, ref_model, tokenizer, prompt, completion, advantage, config):
+    """Compute GRPO loss for a single (prompt, completion, advantage) triple.
+    
+    L = -advantage * log_prob(completion | prompt; model)
+        + kl_coeff * KL(model || ref_model)
+    """
+    # Current policy log prob
+    log_prob = calculate_log_probs(model, tokenizer, prompt, completion)
+    
+    # Policy gradient loss (weighted by advantage)
+    pg_loss = -advantage * log_prob
+    
+    # KL penalty against reference model (keeps model from diverging too far)
+    if config.kl_coeff > 0:
+        ref_log_prob = calculate_log_probs(ref_model, tokenizer, prompt, completion)
+        kl_div = log_prob - ref_log_prob
+        kl_penalty = config.kl_coeff * kl_div
+    else:
+        kl_penalty = mx.array(0.0)
+    
+    return pg_loss + kl_penalty
 
 
 class GRPOTrainer:
-    """GRPO trainer for MLX models with LoRA."""
+    """GRPO trainer for MLX models."""
 
-    def __init__(self, model, tokenizer, config: GRPOConfig):
+    def __init__(self, model, tokenizer, config: GRPOConfig, total_steps: int = 100):
         self.model = model
         self.tokenizer = tokenizer
         self.config = config
         
-        # Apply LoRA
-        self.lora_params = apply_lora(model, config)
+        # Reference model (frozen — never updated, for KL penalty)
+        self.ref_model = copy.deepcopy(model)
         
-        # Optimizer (only LoRA params)
-        self.optimizer = optim.AdamW(
-            learning_rate=config.learning_rate,
-            weight_decay=config.weight_decay,
-        )
+        # Rollout model (frozen copy for generation, synced periodically)
+        self.rollout_model = copy.deepcopy(model)
+        
+        # Optimizer
+        schedule = cosine_decay(config.learning_rate, total_steps)
+        self.optimizer = Adam(learning_rate=schedule)
+        
+        # State
+        self.step = 0
+        self._accum_grads = None
+        self._accum_count = 0
+    
+    def generate_rollouts(self, prompt: str) -> list[str]:
+        """Generate multiple responses using the rollout model."""
+        sampler = make_sampler(temp=self.config.temperature)
+        responses = []
+        for _ in range(self.config.group_size):
+            # Use chat template
+            messages = [{"role": "user", "content": prompt}]
+            formatted = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            raw = generate(
+                self.rollout_model, self.tokenizer,
+                prompt=formatted,
+                max_tokens=self.config.max_new_tokens,
+                sampler=sampler,
+            )
+            responses.append(raw)
+        return responses
 
     def train_step(
         self,
-        prompts: list[str],
-        rewards: list[list[float]],
-        responses: list[list[str]],
+        prompt: str,
+        responses: list[str],
+        rewards: list[float],
     ) -> float:
-        """Execute one GRPO training step."""
-        loss_and_grad_fn = nn.value_and_grad(
-            self.model,
-            lambda m, p, rew, resp: compute_grpo_loss(
-                m, self.tokenizer, p, rew, resp, self.config
-            ),
+        """Execute one GRPO training step.
+        
+        Args:
+            prompt: The original problem prompt
+            responses: List of model responses (group_size)
+            rewards: List of reward scores (group_size)
+        
+        Returns:
+            Loss value
+        """
+        # Compute group-relative advantages
+        mean_r = sum(rewards) / len(rewards)
+        std_r = max(
+            math.sqrt(sum((r - mean_r) ** 2 for r in rewards) / len(rewards)),
+            1e-8,
         )
-
-        loss, grads = loss_and_grad_fn(
-            self.model, prompts, rewards, responses
+        advantages = [(r - mean_r) / std_r for r in rewards]
+        
+        # Format prompt with chat template
+        messages = [{"role": "user", "content": prompt}]
+        formatted_prompt = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
         )
-
-        # Update only LoRA parameters
-        self.optimizer.update(self.model, grads)
-        mx.eval(self.model.parameters(), self.optimizer.state)
-
-        return loss.item()
+        
+        total_loss = 0.0
+        n_updates = 0
+        
+        for response, advantage in zip(responses, advantages):
+            if advantage <= 0:
+                continue  # Only train on above-average responses
+            
+            # Compute loss and gradients
+            loss_fn = nn.value_and_grad(
+                self.model,
+                lambda m: grpo_loss_single(
+                    m, self.ref_model, self.tokenizer,
+                    formatted_prompt, response, advantage, self.config
+                ),
+            )
+            
+            loss, grads = loss_fn(self.model)
+            
+            # Gradient accumulation
+            if self._accum_grads is None:
+                self._accum_grads = grads
+            else:
+                self._accum_grads = tree_map(
+                    lambda a, b: a + b, self._accum_grads, grads
+                )
+            self._accum_count += 1
+            
+            # Apply accumulated gradients
+            if self._accum_count >= self.config.gradient_accumulation_steps:
+                # Average gradients
+                scale = 1.0 / self._accum_count
+                avg_grads = tree_map(lambda g: g * scale, self._accum_grads)
+                
+                # Gradient clipping
+                if self.config.max_grad_norm > 0:
+                    norms = [mx.sqrt(mx.sum(g * g)) for g, _ in tree_flatten(avg_grads)]
+                    total_norm = mx.sqrt(sum(n * n for n in norms)) if norms else mx.array(0.0)
+                    clip_coef = min(1.0, self.config.max_grad_norm / (total_norm.item() + 1e-6))
+                    if clip_coef < 1.0:
+                        avg_grads = tree_map(lambda g: g * clip_coef, avg_grads)
+                
+                # Update
+                self.optimizer.update(self.model, avg_grads)
+                mx.eval(self.model.parameters(), self.optimizer.state)
+                
+                self._accum_grads = None
+                self._accum_count = 0
+            
+            total_loss += loss.item()
+            n_updates += 1
+        
+        self.step += 1
+        
+        # Sync rollout model every 10 steps
+        if self.step % 10 == 0:
+            self._sync_rollout_model()
+        
+        return total_loss / max(n_updates, 1)
+    
+    def _sync_rollout_model(self):
+        """Sync rollout model weights with current model."""
+        for (name, param), (_, rollout_param) in zip(
+            tree_flatten(self.model.parameters()),
+            tree_flatten(self.rollout_model.parameters()),
+        ):
+            rollout_param[:] = param
+        mx.eval(self.rollout_model.parameters())
 
     def save_checkpoint(self, path: str):
-        """Save LoRA weights."""
-        # Collect LoRA state
-        lora_state = {}
-        for name, module in self.model.named_modules():
-            if isinstance(module, LoRALinear):
-                lora_state[name] = {
-                    "lora_a": module.lora_a,
-                    "lora_b": module.lora_b,
-                }
-        mx.savez(path, **{
-            f"{k}.{p}": v
-            for k, params in lora_state.items()
-            for p, v in params.items()
-        })
-        print(f"Saved LoRA checkpoint to {path}")
+        """Save model weights (all trainable params)."""
+        weights = dict(tree_flatten(self.model.trainable_parameters()))
+        mx.savez(path, **weights)
+        print(f"Saved checkpoint to {path} ({len(weights)} tensors)")
 
     def load_checkpoint(self, path: str):
-        """Load LoRA weights."""
+        """Load model weights."""
         state = mx.load(path)
-        # Reconstruct and apply LoRA state
-        for name, module in self.model.named_modules():
-            if isinstance(module, LoRALinear):
-                a_key = f"{name}.lora_a"
-                b_key = f"{name}.lora_b"
-                if a_key in state and b_key in state:
-                    module.lora_a = state[a_key]
-                    module.lora_b = state[b_key]
+        self.model.load_weights(list(state.items()), strict=False)
         mx.eval(self.model.parameters())
-        print(f"Loaded LoRA checkpoint from {path}")
+        print(f"Loaded checkpoint from {path}")
