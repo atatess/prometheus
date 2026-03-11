@@ -9,6 +9,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 from mlx_lm import load, generate
+from mlx_lm.sample_utils import make_sampler
 from mlx_lm.tuner.lora import LoRALinear
 from dataclasses import dataclass
 from typing import Optional
@@ -126,6 +127,7 @@ def generate_rollouts(
     config: GRPOConfig,
 ) -> list[str]:
     """Generate multiple rollout responses for a prompt."""
+    sampler = make_sampler(temp=config.temperature)
     responses = []
     for _ in range(config.group_size):
         response = generate(
@@ -133,7 +135,7 @@ def generate_rollouts(
             tokenizer,
             prompt=prompt,
             max_tokens=config.max_new_tokens,
-            temp=config.temperature,
+            sampler=sampler,
         )
         responses.append(response)
     return responses

@@ -25,22 +25,12 @@ class Problem:
 
 # --- Prompt Templates ---
 
-MATH_PROPOSER_PROMPT = """You are a math problem generator. Generate a novel math problem
-that can be verified programmatically.
+MATH_PROPOSER_PROMPT = """Generate a {difficulty} math problem about {topic}. The answer must be a single number.
 
-Difficulty: {difficulty}
-Topic: {topic}
+Reply with ONLY valid JSON in this exact format:
+{{"prompt": "your math question here", "problem_code": "expected = YOUR_NUMERIC_ANSWER", "test_code": "assert str(student_answer).strip() == str(expected).strip()", "expected_answer": "YOUR_NUMERIC_ANSWER"}}
 
-Output EXACTLY in this JSON format:
-{{
-    "prompt": "The problem statement in natural language",
-    "problem_code": "Python code that sets up the problem (define variables, expected answer)",
-    "test_code": "Python assertions that verify the solution",
-    "expected_answer": "The correct answer"
-}}
-
-The test_code should check if a variable called `student_answer` equals the expected answer.
-Make the problem novel — don't use textbook examples.
+DO NOT use 42 as the answer. Generate a REAL problem with the correct answer.
 """
 
 CODE_PROPOSER_PROMPT = """You are a coding challenge generator. Generate a Python programming
@@ -115,8 +105,18 @@ def build_proposer_prompt(domain: str, difficulty: str = "medium") -> str:
 def parse_proposed_problem(domain: str, raw_output: str) -> Optional[Problem]:
     """Parse the model's raw output into a Problem object."""
     try:
-        # Extract JSON from the response (handle markdown code blocks)
+        # Extract JSON from the response (handle thinking tags and code blocks)
         text = raw_output.strip()
+        
+        # Strip <think>...</think> tags (Qwen3.5 thinking model)
+        if "<think>" in text:
+            # Take everything after the last </think>
+            if "</think>" in text:
+                text = text.split("</think>")[-1].strip()
+            else:
+                # Thinking didn't close — try to find JSON after it
+                pass
+        
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0]
         elif "```" in text:

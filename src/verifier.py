@@ -79,6 +79,9 @@ def verify_code_task(
     import time
     start = time.monotonic()
 
+    # Indent test_code for try block
+    indented_test = "\n".join("    " + line for line in test_code.splitlines())
+    
     # Compose the full script
     full_script = f"""{SANDBOX_HEADER}
 
@@ -90,7 +93,7 @@ def verify_code_task(
 
 # --- Verification ---
 try:
-    {test_code}
+{indented_test}
     print("VERIFICATION_PASSED")
 except AssertionError as e:
     print(f"VERIFICATION_FAILED: {{e}}")

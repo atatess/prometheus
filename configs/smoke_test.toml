@@ -1,5 +1,5 @@
 [model]
-name = "Qwen/Qwen3.5-4B"
+name = "mlx-community/Qwen3.5-4B-MLX-4bit"
 quantize = "4bit"
 lora_rank = 8
 lora_alpha = 16

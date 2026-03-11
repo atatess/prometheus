@@ -58,6 +58,13 @@ def parse_solution(raw_response: str, domain: str) -> Solution:
     """Parse the model's raw response into a Solution object."""
     text = raw_response.strip()
     
+    # Strip <think>...</think> tags
+    if "<think>" in text and "</think>" in text:
+        text = text.split("</think>")[-1].strip()
+    elif "<think>" in text:
+        # Thinking didn't close — try to find answer after thinking markers
+        pass
+    
     # Try to extract a boxed answer (common in math)
     answer = text
     if "\\boxed{" in text:
