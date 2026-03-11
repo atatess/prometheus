@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# MLX / Training artifacts
+outputs/
+checkpoints/
+*.safetensors
+*.bin
+*.pt
+*.gguf
+*.npz
+mlx_model/
+
+# Data
+data/
+datasets/
+*.jsonl
+*.parquet
+!examples/*.jsonl
+
+# Logs & results
+logs/
+*.log
+wandb/
+runs/
+
+# Secrets & credentials - NEVER commit these
+.env
+*.key
+*.pem
+*.secret
+credentials.*
+tokens.*
+*_key.json
+*_secret.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Experiment state
+experiments/
+results.tsv

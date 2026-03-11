@@ -1,0 +1,35 @@
+[model]
+name = "Qwen/Qwen3.5-4B"
+quantize = "4bit"
+lora_rank = 16
+lora_alpha = 32
+lora_targets = ["q_proj", "v_proj", "k_proj", "o_proj"]
+
+[training]
+method = "grpo"
+group_size = 4              # Rollouts per prompt
+learning_rate = 5e-6
+weight_decay = 0.01
+max_new_tokens = 512
+time_budget_minutes = 5     # Per experiment
+warmup_steps = 10
+grad_accumulation_steps = 4
+max_seq_len = 2048
+
+[curriculum]
+initial_domains = ["math", "code"]
+enable_verification_factory = true
+frontier_band = [0.3, 0.8]  # Self-consistency sweet spot
+problems_per_round = 32
+max_domain_saturation = 0.85  # Trigger expansion when accuracy > this
+
+[meta]
+enable_domain_expansion = true
+enable_autoresearch = false
+benchmark_interval = 10     # Eval every N experiments
+checkpoint_interval = 5     # Save every N experiments
+max_experiments = -1        # -1 = unlimited (run overnight)
+
+[sandbox]
+timeout_seconds = 30        # Max execution time per verification
+max_memory_mb = 512         # Memory limit for sandbox
