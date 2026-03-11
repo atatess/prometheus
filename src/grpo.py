@@ -16,6 +16,7 @@ from mlx.optimizers import Adam, cosine_decay
 from mlx.utils import tree_flatten, tree_map
 from mlx_lm import load, generate
 from mlx_lm.sample_utils import make_sampler
+from mlx_lm.tuner.utils import linear_to_lora_layers
 
 from .model_utils import strip_thinking
 
@@ -36,14 +37,25 @@ class GRPOConfig:
     warmup_ratio: float = 0.1
 
 
-def calculate_log_probs(model, tokenizer, prompt: str, completion: str) -> mx.array:
+def calculate_log_probs(model, tokenizer, prompt: str, completion: str, max_seq_len: int = 384) -> mx.array:
     """Compute log p(completion | prompt) for a single sample.
     
-    Feeds prompt + completion through model, extracts log probs
-    for completion tokens only.
+    Memory-efficient: truncates total sequence to max_seq_len tokens
+    to fit in Metal GPU memory on 32GB M2 Max.
     """
     prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
     completion_tokens = tokenizer.encode(completion, add_special_tokens=False)
+    
+    # Truncate to fit in memory — keep as much completion as possible
+    # but cap total at max_seq_len
+    total = len(prompt_tokens) + len(completion_tokens)
+    if total > max_seq_len:
+        # Prioritize keeping the prompt + trimming completion
+        max_completion = max(32, max_seq_len - len(prompt_tokens))
+        completion_tokens = completion_tokens[:max_completion]
+        # If prompt is too long too, truncate from the front
+        if len(prompt_tokens) > max_seq_len - 32:
+            prompt_tokens = prompt_tokens[-(max_seq_len - 32):]
     
     full_tokens = prompt_tokens + completion_tokens
     input_ids = mx.array(full_tokens, dtype=mx.int32)[None, :]
@@ -70,27 +82,16 @@ def calculate_log_probs(model, tokenizer, prompt: str, completion: str) -> mx.ar
         return mx.array(0.0)
 
 
-def grpo_loss_single(model, ref_model, tokenizer, prompt, completion, advantage, config):
+def grpo_loss_single(model, tokenizer, prompt, completion, advantage, config):
     """Compute GRPO loss for a single (prompt, completion, advantage) triple.
     
     L = -advantage * log_prob(completion | prompt; model)
-        + kl_coeff * KL(model || ref_model)
+    
+    KL penalty disabled to save memory (no reference model copy needed).
     """
-    # Current policy log prob
     log_prob = calculate_log_probs(model, tokenizer, prompt, completion)
-    
-    # Policy gradient loss (weighted by advantage)
     pg_loss = -advantage * log_prob
-    
-    # KL penalty against reference model (keeps model from diverging too far)
-    if config.kl_coeff > 0:
-        ref_log_prob = calculate_log_probs(ref_model, tokenizer, prompt, completion)
-        kl_div = log_prob - ref_log_prob
-        kl_penalty = config.kl_coeff * kl_div
-    else:
-        kl_penalty = mx.array(0.0)
-    
-    return pg_loss + kl_penalty
+    return pg_loss
 
 
 class GRPOTrainer:
@@ -101,11 +102,24 @@ class GRPOTrainer:
         self.tokenizer = tokenizer
         self.config = config
         
-        # Reference model (frozen — never updated, for KL penalty)
-        self.ref_model = copy.deepcopy(model)
+        # Apply LoRA adapters for training (enables backward pass on quantized model)
+        lora_config = {
+            'rank': 8,
+            'alpha': 16,
+            'scale': 2.0,
+            'keys': ['gate_proj', 'up_proj', 'down_proj'],
+        }
+        linear_to_lora_layers(model, num_layers=32, config=lora_config)
+        model.train()
         
-        # Rollout model (frozen copy for generation, synced periodically)
-        self.rollout_model = copy.deepcopy(model)
+        # Count trainable params
+        trainable = sum(p.size for _, p in tree_flatten(model.trainable_parameters()))
+        total = sum(p.size for _, p in tree_flatten(model.parameters()))
+        print(f"  LoRA: {trainable/1e6:.2f}M trainable / {total/1e6:.0f}M total ({trainable/total*100:.3f}%)")
+        
+        # No reference model copy — saves ~3GB on 32GB machine
+        # KL penalty disabled (kl_coeff=0) to save memory
+        self.ref_model = None
         
         # Optimizer
         schedule = cosine_decay(config.learning_rate, total_steps)
@@ -117,17 +131,16 @@ class GRPOTrainer:
         self._accum_count = 0
     
     def generate_rollouts(self, prompt: str) -> list[str]:
-        """Generate multiple responses using the rollout model."""
+        """Generate multiple responses using the current model."""
         sampler = make_sampler(temp=self.config.temperature)
         responses = []
         for _ in range(self.config.group_size):
-            # Use chat template
             messages = [{"role": "user", "content": prompt}]
             formatted = self.tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
             raw = generate(
-                self.rollout_model, self.tokenizer,
+                self.model, self.tokenizer,
                 prompt=formatted,
                 max_tokens=self.config.max_new_tokens,
                 sampler=sampler,
@@ -176,7 +189,7 @@ class GRPOTrainer:
             loss_fn = nn.value_and_grad(
                 self.model,
                 lambda m: grpo_loss_single(
-                    m, self.ref_model, self.tokenizer,
+                    m, self.tokenizer,
                     formatted_prompt, response, advantage, self.config
                 ),
             )
@@ -200,7 +213,7 @@ class GRPOTrainer:
                 
                 # Gradient clipping
                 if self.config.max_grad_norm > 0:
-                    norms = [mx.sqrt(mx.sum(g * g)) for g, _ in tree_flatten(avg_grads)]
+                    norms = [mx.sqrt(mx.sum(g * g)) for _, g in tree_flatten(avg_grads)]
                     total_norm = mx.sqrt(sum(n * n for n in norms)) if norms else mx.array(0.0)
                     clip_coef = min(1.0, self.config.max_grad_norm / (total_norm.item() + 1e-6))
                     if clip_coef < 1.0:
@@ -225,13 +238,8 @@ class GRPOTrainer:
         return total_loss / max(n_updates, 1)
     
     def _sync_rollout_model(self):
-        """Sync rollout model weights with current model."""
-        for (name, param), (_, rollout_param) in zip(
-            tree_flatten(self.model.parameters()),
-            tree_flatten(self.rollout_model.parameters()),
-        ):
-            rollout_param[:] = param
-        mx.eval(self.rollout_model.parameters())
+        """No-op — we generate rollouts from the trainable model directly."""
+        pass
 
     def save_checkpoint(self, path: str):
         """Save model weights (all trainable params)."""

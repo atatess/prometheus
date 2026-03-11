@@ -7,14 +7,14 @@ lora_targets = ["q_proj", "v_proj"]
 
 [training]
 method = "grpo"
-group_size = 4
+group_size = 8
 learning_rate = 5e-6
 weight_decay = 0.01
-max_new_tokens = 256
-time_budget_minutes = 5
+max_new_tokens = 1500
+time_budget_minutes = 30
 warmup_steps = 5
 grad_accumulation_steps = 2
-max_seq_len = 1024
+max_seq_len = 512
 
 [curriculum]
 initial_domains = ["math"]

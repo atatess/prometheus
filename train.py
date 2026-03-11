@@ -7,6 +7,7 @@ This file can be modified by the meta-agent (autoresearch outer loop).
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from src.proposer import build_proposer_prompt, parse_proposed_problem
 from src.solver import build_solver_prompt, parse_solution
 from src.verifier import verify_code_task, verify_math, SandboxConfig
 from src.curriculum import Curriculum, CurriculumConfig
+from src.seed_problems import SEED_PROBLEMS
 
 
 def load_config(config_path: str) -> dict:
@@ -55,7 +57,7 @@ def run_experiment(config: dict, experiment_dir: Path):
     time_budget = config["training"]["time_budget_minutes"] * 60
     estimated_steps = max(10, int(time_budget / 30))  # ~30s per step
     trainer = GRPOTrainer(model, tokenizer, grpo_config, total_steps=estimated_steps)
-    print(f"✅ GRPO trainer initialized (3 model copies)")
+    print(f"✅ GRPO trainer initialized (LoRA + single model for 32GB)")
     
     # --- Setup Curriculum ---
     curriculum_config = CurriculumConfig(
@@ -82,10 +84,15 @@ def run_experiment(config: dict, experiment_dir: Path):
     total_attempts = 0
     losses = []
     train_steps_done = 0
+    seed_idx = 0  # Index into seed problems
+    
+    import random
+    random.shuffle(SEED_PROBLEMS)
     
     print(f"\n⏱️  Time budget: {config['training']['time_budget_minutes']} minutes")
     print(f"🎯 Domains: {curriculum.domains}")
     print(f"🔄 Group size: {grpo_config.group_size}")
+    print(f"🌱 Seed problems: {len(SEED_PROBLEMS)} (multi-domain: math, logic, spatial, science, data)")
     print()
     
     while (time.monotonic() - start_time) < time_budget:
@@ -104,14 +111,19 @@ def run_experiment(config: dict, experiment_dir: Path):
         difficulty = curriculum.select_difficulty(domain)
         print(f"  Domain: {domain} | Difficulty: {difficulty}")
         
-        # 2. Generate a problem (Proposer)
-        proposer_prompt = build_proposer_prompt(domain, difficulty)
-        raw_problem = chat_generate(model, tokenizer, proposer_prompt, max_tokens=2000)
-        problem = parse_proposed_problem(domain, raw_problem)
-        
-        if problem is None:
-            print(f"  ⚠️  Failed to parse problem, skipping")
-            continue
+        # 2. Get a problem — seed problems first, then model-generated
+        if seed_idx < len(SEED_PROBLEMS):
+            problem = SEED_PROBLEMS[seed_idx]
+            seed_idx += 1
+            print(f"  🌱 Seed problem [{problem.domain}]")
+        else:
+            proposer_prompt = build_proposer_prompt(domain, difficulty)
+            raw_problem = chat_generate(model, tokenizer, proposer_prompt, max_tokens=2000)
+            problem = parse_proposed_problem(domain, raw_problem)
+            
+            if problem is None:
+                print(f"  ⚠️  Failed to parse problem, skipping")
+                continue
         
         print(f"  📝 Problem: {problem.prompt[:80]}...")
         
@@ -124,6 +136,11 @@ def run_experiment(config: dict, experiment_dir: Path):
         solutions = [parse_solution(r, domain) for r in clean_responses]
         
         # 4. Verify each solution
+        expected = problem.metadata.get("expected_answer", "?")
+        print(f"  📊 Expected: {expected}")
+        for i, (sol, raw) in enumerate(zip(solutions, clean_responses)):
+            print(f"     Rollout {i}: answer='{sol.answer}' (from: '{raw[:60]}...')")
+        
         rewards = []
         for sol in solutions:
             if domain == "math" and "expected_answer" in problem.metadata:
@@ -152,7 +169,8 @@ def run_experiment(config: dict, experiment_dir: Path):
         # 5. GRPO training step
         if sum(rewards) > 0 and sum(rewards) < len(rewards):
             # Need both positive and negative examples for GRPO
-            loss = trainer.train_step(solver_prompt, responses, rewards)
+            # Use stripped responses (without thinking) to save memory
+            loss = trainer.train_step(solver_prompt, clean_responses, rewards)
             losses.append(loss)
             train_steps_done += 1
             print(f"  📉 GRPO Loss: {loss:.4f}")

@@ -127,6 +127,10 @@ def parse_proposed_problem(domain: str, raw_output: str) -> Optional[Problem]:
             text = text.split("```")[1].split("```")[0]
 
         data = json.loads(text)
+        
+        # Must be a dict with prompt key
+        if not isinstance(data, dict):
+            return None
 
         # Validate — reject template copies
         prompt = data.get("prompt", "")
