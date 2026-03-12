@@ -63,27 +63,39 @@ def strip_thinking(text: str) -> str:
     if json_matches:
         return json_matches[-1]
     
-    # Format 3: Find ANSWER: pattern — but only when it looks like a real answer
-    # (a number or short value, not a quoted description)
-    answer_matches = re.findall(r'ANSWER:\s*(\d+(?:\.\d+)?(?:/\d+)?)', text)
-    if answer_matches:
-        return answer_matches[-1]  # Last match is usually the final answer
+    # Number pattern: integers, decimals, fractions, negative numbers
+    NUM = r'-?\d+(?:\.\d+)?(?:/\d+)?'
     
-    # Format 4: "The answer is X" — extract the value
-    answer_matches = re.findall(r'(?:answer|result) (?:is|=)\s*[:\s]*(\d+(?:\.\d+)?(?:/\d+)?)', text, re.IGNORECASE)
+    # Format 3: Find ANSWER: pattern
+    answer_matches = re.findall(rf'ANSWER:\s*({NUM})', text)
     if answer_matches:
         return answer_matches[-1]
     
-    # Format 5: "$X$" boxed math — last standalone number
-    boxed = re.findall(r'\$(\d+(?:\.\d+)?)\$', text)
+    # Format 4: "The answer is X"
+    answer_matches = re.findall(rf'(?:answer|result)\s+(?:is|=)\s*:?\s*({NUM})', text, re.IGNORECASE)
+    if answer_matches:
+        return answer_matches[-1]
+    
+    # Format 5: Fractions like "1/6" or "5/14" — find standalone fractions
+    fractions = re.findall(r'(?:^|\s)(\d+/\d+)(?:\s|$|\.)', text)
+    if fractions:
+        return fractions[-1]
+    
+    # Format 6: "$X$" boxed math
+    boxed = re.findall(r'\$({NUM})\$'.replace('NUM', r'-?\d+(?:\.\d+)?(?:/\d+)?'), text)
     if boxed:
         return boxed[-1]
     
-    # Format 6: Last line that's just a number
+    # Format 7: \\boxed{X}
+    boxed2 = re.findall(r'\\boxed\{([^}]+)\}', text)
+    if boxed2:
+        return boxed2[-1].strip()
+    
+    # Format 8: Last line that's just a number/fraction
     lines = text.strip().split('\n')
     for line in reversed(lines):
         line = line.strip().rstrip('.')
-        if re.match(r'^-?\d+(?:\.\d+)?(?:/\d+)?$', line):
+        if re.match(rf'^{NUM}$', line):
             return line
     
     # Fallback: return the original text

@@ -16,6 +16,7 @@ try:
 except ImportError:
     import tomli as tomllib
 
+import mlx.core as mx
 from mlx_lm import load
 
 from src.grpo import GRPOConfig, GRPOTrainer
@@ -127,15 +128,42 @@ def run_experiment(config: dict, experiment_dir: Path):
         
         print(f"  📝 Problem: {problem.prompt[:80]}...")
         
-        # 3. Generate solutions (Solver) — multiple rollouts for GRPO
+        # 3. Probe first — quick single rollout to check if problem is in goldilocks zone
         solver_prompt = build_solver_prompt(problem)
-        responses = trainer.generate_rollouts(solver_prompt)
+        probe_responses = trainer.generate_rollouts_n(solver_prompt, n=1)
+        probe_clean = strip_thinking(probe_responses[0])
+        probe_sol = parse_solution(probe_clean, problem.domain)
+        
+        expected = problem.metadata.get("expected_answer", "")
+        probe_result = verify_math(problem.prompt, probe_sol.answer, expected)
+        
+        if probe_result.correct:
+            # Probe passed — likely too easy. Do one more to confirm
+            probe2 = trainer.generate_rollouts_n(solver_prompt, n=1)
+            probe2_clean = strip_thinking(probe2[0])
+            probe2_sol = parse_solution(probe2_clean, problem.domain)
+            probe2_result = verify_math(problem.prompt, probe2_sol.answer, expected)
+            
+            if probe2_result.correct:
+                # Both probes correct — skip, too easy
+                print(f"  ⏭️  Probe: 2/2 correct — too easy, skipping")
+                curriculum.record_attempt(problem.domain, True)
+                continue
+            else:
+                # Mixed — do full rollouts starting with what we have
+                remaining = trainer.generate_rollouts_n(solver_prompt, n=grpo_config.group_size - 2)
+                responses = probe_responses + probe2 + remaining
+        else:
+            # Probe failed — might be goldilocks zone, do full rollouts
+            remaining = trainer.generate_rollouts_n(solver_prompt, n=grpo_config.group_size - 1)
+            responses = probe_responses + remaining
         
         # Strip thinking from responses for answer extraction
         clean_responses = [strip_thinking(r) for r in responses]
-        solutions = [parse_solution(r, domain) for r in clean_responses]
+        solutions = [parse_solution(r, problem.domain) for r in clean_responses]
         
         # 4. Verify each solution
+        actual_domain = problem.domain  # Use problem's domain, not curriculum's
         expected = problem.metadata.get("expected_answer", "?")
         print(f"  📊 Expected: {expected}")
         for i, (sol, raw) in enumerate(zip(solutions, clean_responses)):
@@ -143,7 +171,7 @@ def run_experiment(config: dict, experiment_dir: Path):
         
         rewards = []
         for sol in solutions:
-            if domain == "math" and "expected_answer" in problem.metadata:
+            if "expected_answer" in problem.metadata:
                 result = verify_math(
                     problem.prompt, sol.answer, problem.metadata["expected_answer"]
                 )
@@ -161,7 +189,7 @@ def run_experiment(config: dict, experiment_dir: Path):
             if result.correct:
                 total_correct += 1
         
-        curriculum.record_attempt(domain, any(r > 0 for r in rewards))
+        curriculum.record_attempt(actual_domain, any(r > 0 for r in rewards))
         
         accuracy = sum(rewards) / len(rewards)
         print(f"  ✅ Rollout accuracy: {accuracy:.1%} ({int(sum(rewards))}/{len(rewards)})")
@@ -174,10 +202,19 @@ def run_experiment(config: dict, experiment_dir: Path):
             losses.append(loss)
             train_steps_done += 1
             print(f"  📉 GRPO Loss: {loss:.4f}")
+            # Save checkpoint after every training update
+            checkpoint_path = experiment_dir / "checkpoint.npz"
+            trainer.save_checkpoint(str(checkpoint_path))
+            print(f"  💾 Checkpoint saved")
         elif sum(rewards) == len(rewards):
             print(f"  ⏭️  All correct — too easy, no training signal")
         else:
             print(f"  ⏭️  All wrong — too hard, no training signal")
+        
+        # Aggressive memory cleanup between steps
+        import gc
+        mx.clear_cache()
+        gc.collect()
         
         # Time check
         if (time.monotonic() - start_time) > time_budget * 0.95:

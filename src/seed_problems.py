@@ -144,7 +144,7 @@ SEED_PROBLEMS = [
     ),
     Problem(
         domain="data", difficulty="hard",
-        prompt="A dataset has values [10, 20, 30, 40, 50]. What is the standard deviation? Round to 1 decimal place.",
+        prompt="A dataset has values [10, 20, 30, 40, 50]. What is the POPULATION standard deviation? Round to 1 decimal place.",
         problem_code="expected = 14.1",
         test_code="assert str(student_answer).strip() == str(expected).strip()",
         metadata={"expected_answer": "14.1"},

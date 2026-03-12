@@ -131,10 +131,15 @@ class GRPOTrainer:
         self._accum_count = 0
     
     def generate_rollouts(self, prompt: str) -> list[str]:
-        """Generate multiple responses using the current model."""
+        """Generate group_size responses."""
+        return self.generate_rollouts_n(prompt, self.config.group_size)
+    
+    def generate_rollouts_n(self, prompt: str, n: int) -> list[str]:
+        """Generate n responses using the current model."""
+        import gc
         sampler = make_sampler(temp=self.config.temperature)
         responses = []
-        for _ in range(self.config.group_size):
+        for i in range(n):
             messages = [{"role": "user", "content": prompt}]
             formatted = self.tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
@@ -146,6 +151,10 @@ class GRPOTrainer:
                 sampler=sampler,
             )
             responses.append(raw)
+            # Free KV cache between generations
+            if i % 2 == 1:
+                mx.clear_cache()
+                gc.collect()
         return responses
 
     def train_step(

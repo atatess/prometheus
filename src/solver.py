@@ -123,11 +123,16 @@ def parse_solution(raw_response: str, domain: str) -> Solution:
     if domain == "code" and code:
         answer = code
     
-    # Fallback: extract last number from text (for math)
-    if domain == "math" and answer == text:
-        numbers = re.findall(r'-?\d+\.?\d*', text)
-        if numbers:
-            answer = numbers[-1]
+    # Fallback: extract last number/fraction from text (for math)
+    if domain in ("math", "logic", "spatial", "science", "data") and answer == text:
+        # Try fractions first (e.g., 1/6, 5/14)
+        fracs = re.findall(r'\d+/\d+', text)
+        if fracs:
+            answer = fracs[-1]
+        else:
+            numbers = re.findall(r'-?\d+\.?\d*', text)
+            if numbers:
+                answer = numbers[-1]
     
     return Solution(
         raw_response=raw_response,
