@@ -25,16 +25,22 @@ class Problem:
 
 # --- Prompt Templates ---
 
-MATH_PROPOSER_PROMPT = """Solve this task: generate a {difficulty} math problem about {topic} and compute its answer.
+MATH_PROPOSER_PROMPT = """You are a math teacher writing exam questions. Write one {difficulty} math problem about {topic} and solve it.
 
-Step 1 — Write a problem. Step 2 — Solve it. Step 3 — Output ONLY this JSON with real values:
-{{"prompt": "<your problem here>", "expected_answer": "<the number you computed>"}}
+Here are three examples of the format I want:
 
-Example of correct output:
-{{"prompt": "A train travels 120 km in 2 hours. What is its speed in km/h?", "expected_answer": "60"}}
+PROBLEM: A train travels 120 km in 2 hours. What is its speed in km/h?
+ANSWER: 60
 
-Topic: {topic}, Difficulty: {difficulty}. Output JSON only.
-"""
+PROBLEM: How many prime numbers are less than 10?
+ANSWER: 4
+
+PROBLEM: What is 15% of 80?
+ANSWER: 12
+
+Now write a NEW problem about {topic} at {difficulty} difficulty. Do NOT copy the examples above. Solve it yourself.
+
+PROBLEM:"""
 
 CODE_PROPOSER_PROMPT = """You are a coding challenge generator. Generate a Python programming
 problem that can be automatically tested.
@@ -53,28 +59,35 @@ Output EXACTLY in this JSON format:
 Include 3-5 test cases in test_code.
 """
 
-LOGIC_PROPOSER_PROMPT = """Solve this task: generate a {difficulty} logic puzzle and compute its answer.
+LOGIC_PROPOSER_PROMPT = """You are a logic teacher writing puzzles. Write one {difficulty} logic or reasoning puzzle and solve it.
 
-Step 1 — Write a self-contained puzzle. Step 2 — Solve it. Step 3 — Output ONLY this JSON:
-{{"prompt": "<your puzzle here>", "expected_answer": "<the number you computed>"}}
+Here are two examples of the format I want:
 
-Example of correct output:
-{{"prompt": "Alice is twice Bob's age. Bob is 15. How old is Alice?", "expected_answer": "30"}}
+PROBLEM: Alice is twice Bob's age. Bob is 15. How old is Alice?
+ANSWER: 30
 
-Difficulty: {difficulty}. Output JSON only.
-"""
+PROBLEM: If it takes 3 workers 6 days to dig a ditch, how many days would 9 workers take?
+ANSWER: 2
 
-SPATIAL_PROPOSER_PROMPT = """Solve this task: generate a {difficulty} spatial reasoning problem and compute its answer.
+Now write a NEW puzzle at {difficulty} difficulty. Do NOT copy the examples. Solve it yourself.
 
-Topics: faces/edges/vertices of shapes, painted cube cuts, grid paths, nets, rotations.
-Step 1 — Write a problem. Step 2 — Solve it. Step 3 — Output ONLY this JSON:
-{{"prompt": "<your problem here>", "expected_answer": "<the number you computed>"}}
+PROBLEM:"""
 
-Example of correct output:
-{{"prompt": "How many faces does a triangular prism have?", "expected_answer": "5"}}
+SPATIAL_PROPOSER_PROMPT = """You are a geometry teacher writing problems. Write one {difficulty} spatial reasoning problem and solve it.
 
-Difficulty: {difficulty}. Output JSON only.
-"""
+Topics: edges/faces/vertices of 3D shapes, painted cube cuts, grid paths, symmetry.
+
+Here are two examples of the format I want:
+
+PROBLEM: How many edges does a triangular prism have?
+ANSWER: 9
+
+PROBLEM: A cube is painted red on all faces then cut into 8 equal pieces. How many pieces have exactly 3 painted faces?
+ANSWER: 8
+
+Now write a NEW problem at {difficulty} difficulty. Do NOT copy the examples. Solve it yourself.
+
+PROBLEM:"""
 
 # Domain registry — maps domain names to their proposer prompts
 DOMAIN_PROMPTS = {
@@ -113,59 +126,88 @@ def build_proposer_prompt(domain: str, difficulty: str = "medium") -> str:
 
 
 def parse_proposed_problem(domain: str, raw_output: str) -> Optional[Problem]:
-    """Parse the model's raw output into a Problem object."""
+    """Parse the model's raw output into a Problem object.
+    
+    Supports two formats:
+    1. PROBLEM: ... / ANSWER: ... (new plain-text format)
+    2. JSON {"prompt": ..., "expected_answer": ...} (legacy)
+    """
+    import re
+    
+    # Strip thinking tags first
+    text = raw_output.strip()
+    if "<think>" in text and "</think>" in text:
+        text = text.split("</think>")[-1].strip()
+    
+    # --- Try plain-text PROBLEM/ANSWER format first ---
+    prob_match = re.search(r'PROBLEM:\s*(.+?)(?=\nANSWER:|\Z)', text, re.DOTALL | re.IGNORECASE)
+    ans_match = re.search(r'ANSWER:\s*(.+?)(?=\n[A-Z]|\Z)', text, re.DOTALL | re.IGNORECASE)
+    
+    if prob_match and ans_match:
+        prompt = prob_match.group(1).strip()
+        expected = ans_match.group(1).strip().split('\n')[0].strip()  # first line only
+        
+        if _is_valid_problem(prompt, expected):
+            return Problem(
+                domain=domain,
+                difficulty="medium",
+                prompt=prompt,
+                problem_code=f"expected = {repr(expected)}",
+                test_code="assert str(student_answer).strip() == str(expected).strip()",
+                metadata={"expected_answer": expected},
+            )
+    
+    # --- Fallback: try JSON format ---
     try:
-        # Extract JSON from the response (handle thinking tags and code blocks)
-        text = raw_output.strip()
-        
-        # Strip <think>...</think> tags (Qwen3.5 thinking model)
-        if "<think>" in text:
-            # Take everything after the last </think>
-            if "</think>" in text:
-                text = text.split("</think>")[-1].strip()
-            else:
-                # Thinking didn't close — try to find JSON after it
-                pass
-        
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0]
         elif "```" in text:
             text = text.split("```")[1].split("```")[0]
-
-        data = json.loads(text)
         
-        # Must be a dict with prompt key
-        if not isinstance(data, dict):
-            return None
+        # Find JSON object
+        json_match = re.search(r'\{[^{}]+\}', text, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group())
+            if isinstance(data, dict):
+                prompt = data.get("prompt", "")
+                expected = str(data.get("expected_answer", ""))
+                if _is_valid_problem(prompt, expected):
+                    return Problem(
+                        domain=domain,
+                        difficulty=data.get("difficulty", "medium"),
+                        prompt=prompt,
+                        problem_code=data.get("problem_code", f"expected = {repr(expected)}"),
+                        test_code=data.get("test_code", "assert str(student_answer).strip() == str(expected).strip()"),
+                        metadata=data,
+                    )
+    except (json.JSONDecodeError, KeyError):
+        pass
+    
+    return None
 
-        # Validate — reject template echoes and placeholder values
-        prompt = data.get("prompt", "")
-        expected = str(data.get("expected_answer", ""))
-        
-        bad_prompts = [
-            "your math question", "your question", "problem text",
-            "problem statement", "the logic puzzle", "puzzle description",
-            "spatial problem", "...", "insert problem", "example problem",
-        ]
-        bad_answers = ["answer", "...", "expected", "result", "value", ""]
-        
-        if any(b in prompt.lower() for b in bad_prompts):
-            return None
-        if expected.lower() in bad_answers or len(expected) == 0:
-            return None
-        if len(prompt) < 15:  # Too short to be a real problem
-            return None
 
-        return Problem(
-            domain=domain,
-            difficulty=data.get("difficulty", "medium"),
-            prompt=prompt,
-            problem_code=data.get("problem_code", f"expected = {data.get('expected_answer', '')}"),
-            test_code=data.get("test_code", "assert str(student_answer).strip() == str(expected).strip()"),
-            metadata=data,
-        )
-    except (json.JSONDecodeError, KeyError) as e:
-        return None
+def _is_valid_problem(prompt: str, expected: str) -> bool:
+    """Validate that a problem/answer pair is not a template echo."""
+    bad_prompts = [
+        "your math question", "your question", "problem text", "problem statement",
+        "the logic puzzle", "puzzle description", "spatial problem", "example problem",
+        "insert problem", "problem here", "your problem", "your puzzle",
+    ]
+    bad_answers = [
+        "answer", "...", "expected", "result", "value", "number",
+        "the number you computed", "computed", "solution",
+    ]
+    
+    if len(prompt) < 15:
+        return False
+    if any(b in prompt.lower() for b in bad_prompts):
+        return False
+    if expected.lower() in bad_answers or len(expected) == 0:
+        return False
+    if expected in ["...", "<", ">", "?"]:
+        return False
+    
+    return True
 
 
 def register_domain(name: str, prompt_template: str, topics: list[str] = None):
