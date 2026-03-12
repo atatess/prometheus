@@ -90,10 +90,14 @@ def run_experiment(config: dict, experiment_dir: Path):
     import random
     random.shuffle(SEED_PROBLEMS)
     
+    # Cap seed problems if configured (forces proposer to kick in earlier)
+    max_seeds = config["curriculum"].get("max_seed_problems", len(SEED_PROBLEMS))
+    seed_pool = SEED_PROBLEMS[:max_seeds]
+    
     print(f"\n⏱️  Time budget: {config['training']['time_budget_minutes']} minutes")
     print(f"🎯 Domains: {curriculum.domains}")
     print(f"🔄 Group size: {grpo_config.group_size}")
-    print(f"🌱 Seed problems: {len(SEED_PROBLEMS)} (multi-domain: math, logic, spatial, science, data)")
+    print(f"🌱 Seed problems: {len(seed_pool)}/{len(SEED_PROBLEMS)} (then proposer takes over)")
     print()
     
     while (time.monotonic() - start_time) < time_budget:
@@ -113,8 +117,8 @@ def run_experiment(config: dict, experiment_dir: Path):
         print(f"  Domain: {domain} | Difficulty: {difficulty}")
         
         # 2. Get a problem — seed problems first, then model-generated
-        if seed_idx < len(SEED_PROBLEMS):
-            problem = SEED_PROBLEMS[seed_idx]
+        if seed_idx < len(seed_pool):
+            problem = seed_pool[seed_idx]
             seed_idx += 1
             print(f"  🌱 Seed problem [{problem.domain}]")
         else:

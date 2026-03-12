@@ -25,16 +25,15 @@ class Problem:
 
 # --- Prompt Templates ---
 
-MATH_PROPOSER_PROMPT = """Create a {difficulty} math problem about {topic}.
+MATH_PROPOSER_PROMPT = """Solve this task: generate a {difficulty} math problem about {topic} and compute its answer.
 
-Rules:
-- The answer MUST be a single integer or simple number
-- The problem must be solvable in 1-3 steps
+Step 1 — Write a problem. Step 2 — Solve it. Step 3 — Output ONLY this JSON with real values:
+{{"prompt": "<your problem here>", "expected_answer": "<the number you computed>"}}
 
-Reply with ONLY this JSON (replace ALL placeholder values):
-{{"prompt": "What is 15 + 27?", "expected_answer": "42"}}
+Example of correct output:
+{{"prompt": "A train travels 120 km in 2 hours. What is its speed in km/h?", "expected_answer": "60"}}
 
-IMPORTANT: Do NOT copy my example. Create a DIFFERENT problem about {topic}.
+Topic: {topic}, Difficulty: {difficulty}. Output JSON only.
 """
 
 CODE_PROPOSER_PROMPT = """You are a coding challenge generator. Generate a Python programming
@@ -54,21 +53,27 @@ Output EXACTLY in this JSON format:
 Include 3-5 test cases in test_code.
 """
 
-LOGIC_PROPOSER_PROMPT = """You are a logic puzzle generator. Generate a logic/reasoning problem
-that can be verified by running a Python program.
+LOGIC_PROPOSER_PROMPT = """Solve this task: generate a {difficulty} logic puzzle and compute its answer.
 
-Difficulty: {difficulty}
+Step 1 — Write a self-contained puzzle. Step 2 — Solve it. Step 3 — Output ONLY this JSON:
+{{"prompt": "<your puzzle here>", "expected_answer": "<the number you computed>"}}
 
-Output EXACTLY in this JSON format:
-{{
-    "prompt": "The logic puzzle in natural language",
-    "problem_code": "Python code that encodes the constraints",
-    "test_code": "Python assertions that verify the solution satisfies all constraints",
-    "expected_answer": "The correct answer"
-}}
+Example of correct output:
+{{"prompt": "Alice is twice Bob's age. Bob is 15. How old is Alice?", "expected_answer": "30"}}
 
-The key insight: express the logic puzzle as CONSTRAINTS in Python.
-For example, a scheduling problem becomes constraint checking code.
+Difficulty: {difficulty}. Output JSON only.
+"""
+
+SPATIAL_PROPOSER_PROMPT = """Solve this task: generate a {difficulty} spatial reasoning problem and compute its answer.
+
+Topics: faces/edges/vertices of shapes, painted cube cuts, grid paths, nets, rotations.
+Step 1 — Write a problem. Step 2 — Solve it. Step 3 — Output ONLY this JSON:
+{{"prompt": "<your problem here>", "expected_answer": "<the number you computed>"}}
+
+Example of correct output:
+{{"prompt": "How many faces does a triangular prism have?", "expected_answer": "5"}}
+
+Difficulty: {difficulty}. Output JSON only.
 """
 
 # Domain registry — maps domain names to their proposer prompts
@@ -76,6 +81,7 @@ DOMAIN_PROMPTS = {
     "math": MATH_PROPOSER_PROMPT,
     "code": CODE_PROPOSER_PROMPT,
     "logic": LOGIC_PROPOSER_PROMPT,
+    "spatial": SPATIAL_PROPOSER_PROMPT,
 }
 
 MATH_TOPICS = [
@@ -132,9 +138,22 @@ def parse_proposed_problem(domain: str, raw_output: str) -> Optional[Problem]:
         if not isinstance(data, dict):
             return None
 
-        # Validate — reject template copies
+        # Validate — reject template echoes and placeholder values
         prompt = data.get("prompt", "")
-        if "your math question" in prompt.lower() or "your question" in prompt.lower():
+        expected = str(data.get("expected_answer", ""))
+        
+        bad_prompts = [
+            "your math question", "your question", "problem text",
+            "problem statement", "the logic puzzle", "puzzle description",
+            "spatial problem", "...", "insert problem", "example problem",
+        ]
+        bad_answers = ["answer", "...", "expected", "result", "value", ""]
+        
+        if any(b in prompt.lower() for b in bad_prompts):
+            return None
+        if expected.lower() in bad_answers or len(expected) == 0:
+            return None
+        if len(prompt) < 15:  # Too short to be a real problem
             return None
 
         return Problem(

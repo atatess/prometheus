@@ -1,0 +1,36 @@
+[model]
+name = "mlx-community/Qwen3.5-4B-MLX-4bit"
+quantize = "4bit"
+lora_rank = 8
+lora_alpha = 16
+lora_targets = ["q_proj", "v_proj"]
+
+[training]
+method = "grpo"
+group_size = 6
+learning_rate = 5e-6
+weight_decay = 0.01
+max_new_tokens = 1500
+time_budget_minutes = 60
+warmup_steps = 5
+grad_accumulation_steps = 2
+max_seq_len = 512
+
+[curriculum]
+initial_domains = ["math", "logic", "spatial"]
+enable_verification_factory = false
+frontier_band = [0.3, 0.8]
+problems_per_round = 8
+max_domain_saturation = 0.85
+max_seed_problems = 10  # cap seeds — proposer takes over after this
+
+[meta]
+enable_domain_expansion = false
+enable_autoresearch = false
+benchmark_interval = 3
+checkpoint_interval = 3
+max_experiments = 5
+
+[sandbox]
+timeout_seconds = 10
+max_memory_mb = 256
