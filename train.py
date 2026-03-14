@@ -52,6 +52,7 @@ else:
     from src.grpo import GRPOConfig, GRPOTrainer
     from src.model_utils import chat_generate, strip_thinking
 from src.proposer import build_proposer_prompt, parse_proposed_problem
+from src.template_proposer import generate_problem as template_generate_problem
 from src.solver import build_solver_prompt, parse_solution
 from src.verifier import verify_code_task, verify_math, SandboxConfig
 from src.curriculum import Curriculum, CurriculumConfig
@@ -169,12 +170,11 @@ def run_experiment(config: dict, experiment_dir: Path):
             problem = parse_proposed_problem(domain, raw_problem)
             
             if problem is None:
-                # Proposer parse failed — fall back to a random seed problem.
-                # This keeps training flowing rather than burning steps on skips.
-                # Proposer fix is tracked in GitHub issues.
-                import random as _rand
-                problem = _rand.choice(seed_pool)
-                print(f"  🔄 Proposer failed, using seed fallback [{problem.domain}]")
+                # Proposer parse failed — use template generator (guaranteed valid).
+                # Template proposer generates problems programmatically from
+                # parameterized templates (no LLM, no parse failure possible).
+                problem = template_generate_problem(domain, difficulty)
+                print(f"  🔄 Proposer failed, template fallback [{problem.domain}]: {problem.prompt[:50]}")
         
         print(f"  📝 Problem: {problem.prompt[:80]}...")
         
