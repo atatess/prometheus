@@ -196,12 +196,15 @@ def run_experiment(config: dict, experiment_dir: Path):
             remaining = trainer.generate_rollouts_n(solver_prompt, n=grpo_config.group_size - 1)
             responses = probe_responses + remaining
         
-        # Parse answers from RAW responses — parse_solution searches for ANSWER:
-        # in the full text including thinking blocks, which is more accurate than
-        # stripping thinking first and losing the ANSWER: marker.
+        # Parse answers from RAW responses — parse_solution searches for FINAL_ANSWER: / ANSWER:
+        # in the full text including thinking blocks.
         solutions = [parse_solution(r, problem.domain) for r in responses]
-        # Clean responses for GRPO loss computation (shorter = more stable gradients)
-        clean_responses = [strip_thinking(r) if strip_thinking(r) else r for r in responses]
+        # Use RAW responses for GRPO loss computation.
+        # Computing log_probs on stripped thinking ("15") fails — the model can't predict
+        # a bare "15" without its reasoning context, making log_probs near-random.
+        # With full responses, log_probs are meaningful and gradients are useful.
+        # (Memory cost is ~2x but still fine on 48GB VRAM.)
+        train_responses = responses
 
         # 4. Verify each solution
         actual_domain = problem.domain  # Use problem's domain, not curriculum's
@@ -239,7 +242,7 @@ def run_experiment(config: dict, experiment_dir: Path):
         if sum(rewards) > 0 and sum(rewards) < len(rewards):
             # Need both positive and negative examples for GRPO
             # Use stripped responses (without thinking) to save memory
-            loss = trainer.train_step(solver_prompt, clean_responses, rewards)
+            loss = trainer.train_step(solver_prompt, train_responses, rewards)
             losses.append(loss)
             train_steps_done += 1
             print(f"  📉 GRPO Loss: {loss:.4f}")
