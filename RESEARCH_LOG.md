@@ -4,6 +4,30 @@
 
 ---
 
+## Run 011 (2026-03-14) — 8hr overnight, ALL bugs fixed ✅
+- **Config:** cuda_overnight.toml (8hr, group_size=8, LR=2e-6)
+- **Status:** RUNNING — loss 0.39 from step 1 (was 7-71 range before fixes)
+- **Meta-loop:** Active alongside training, monitoring every 5min, will auto-expand domains
+
+## Bug Fix Marathon (2026-03-14) — 6 critical bugs destroyed
+
+| # | Bug | Symptom | Fix | Loss After |
+|---|-----|---------|-----|------------|
+| 1 | `log_prob.sum()` vs `mean()` | Loss 7→71 oscillations | `gathered.mean()` | Still ~34 |
+| 2 | Raw text vs chat-formatted prompt | Log_probs near-random | `apply_chat_template` in `train_step` | 0.14 (smoke) |
+| 3 | Stripped thinking in log_probs | Loss ~17 | Pass full raw responses to `train_step` | 0.29 real |
+| 4 | Answer extraction echo | `'" on its own line.'` extracted | `FINAL_ANSWER:` marker + last-match | Correct answers extracted |
+| 5 | Code domain wrong prompt | 0 code training attempts | Remove `CODE_SOLVER_PROMPT`, use standard | Code now trains |
+| 6 | Answer comparison noise | `'3.'` != `'3'` | `_clean_answer()` strips punctuation | Correct rewards |
+
+## New capabilities added (2026-03-14)
+- **`evaluate.py`** — 50 fixed hold-out benchmark problems (math/logic/code/science/hard)
+- **`prometheus.py`** — Layer 3 meta-loop: plateau detection, domain expansion, auto-restart
+- **`src/seed_problems.py`** — 10 code seed problems added (was 0), 46 total
+- **`RESEARCH_LOG.md`** — this file (living document)
+
+---
+
 ## Infrastructure Setup (2026-03-14)
 
 **Hardware:** DigitalOcean L40S GPU (48GB VRAM, Toronto `tor1`)
