@@ -56,29 +56,42 @@ def build_solver_prompt(problem: Problem) -> str:
 
 def parse_solution(raw_response: str, domain: str) -> Solution:
     """Parse the model's raw response into a Solution object."""
+    import re
     text = raw_response.strip()
-    
-    # Strip <think>...</think> tags
+
+    # Pattern 0: Search for ANSWER: anywhere in the raw text FIRST.
+    # This is the most reliable signal — works regardless of thinking format.
+    # Search in full raw response including inside <think> blocks.
+    answer_match = re.search(r'ANSWER:\s*(.+?)(?:\n|$)', text)
+    if answer_match:
+        answer = answer_match.group(1).strip()
+        return Solution(raw_response=raw_response, answer=answer)
+
+    # Strip thinking blocks to get the final response
     if "<think>" in text and "</think>" in text:
         text = text.split("</think>")[-1].strip()
     elif "<think>" in text:
-        # Thinking didn't close — try to find answer in text
-        import re
-        # Look for ANSWER: pattern
-        match = re.search(r'ANSWER:\s*(.+)', text)
-        if match:
-            text = match.group(1).strip()
-        else:
-            # Find last number in the text
-            numbers = re.findall(r'-?\d+\.?\d*', text)
-            if numbers:
-                text = numbers[-1]
-    
+        # Truncated thinking — look for a number in the visible content
+        numbers = re.findall(r'-?\d+\.?\d*', text)
+        if numbers:
+            return Solution(raw_response=raw_response, answer=numbers[-1])
+    elif "Thinking Process:" in text:
+        # Alternative thinking format — take last meaningful line
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        # Look for "Answer:" or similar near the end
+        for line in reversed(lines[-5:]):
+            m = re.match(r'^(?:Answer|Result|Therefore|So)[:\s]+(.+)', line, re.IGNORECASE)
+            if m:
+                return Solution(raw_response=raw_response, answer=m.group(1).strip())
+        # Fallback: last standalone number
+        numbers = re.findall(r'(?:^|\s)(-?\d+\.?\d*)(?:\s|$)', text)
+        if numbers:
+            return Solution(raw_response=raw_response, answer=numbers[-1].strip())
+
     # Try to extract answer from common patterns
     answer = text
-    
-    # Pattern 1: "ANSWER: X"
-    import re
+
+    # Pattern 1: "ANSWER: X" (already searched above, belt-and-suspenders)
     answer_match = re.search(r'ANSWER:\s*(.+?)(?:\n|$)', text)
     if answer_match:
         answer = answer_match.group(1).strip()
