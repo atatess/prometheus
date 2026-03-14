@@ -147,13 +147,19 @@ class VerificationFactory:
 
         text = raw_output.strip()
 
+        # 0. Search inside <think>...</think> blocks too —
+        #    the model sometimes generates the JSON during thinking
+        if "<think>" in text:
+            # Take everything (thinking + answer) — JSON could be anywhere
+            text = text.replace("<think>", "").replace("</think>", "")
+
         # 1. Extract from markdown code fences
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0].strip()
         elif "```" in text:
             text = text.split("```")[1].split("```")[0].strip()
         else:
-            # Find the JSON object — look for the opening brace
+            # Find the JSON object — look for the opening brace of the root object
             brace_idx = text.find("{")
             if brace_idx != -1:
                 text = text[brace_idx:]

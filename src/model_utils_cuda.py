@@ -61,6 +61,43 @@ def strip_thinking(text: str) -> str:
     return text.strip()
 
 
+def raw_generate(
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizerBase,
+    user_msg: str,
+    max_tokens: int = 2500,
+    temp: float = 0.7,
+) -> str:
+    """Generate a response WITHOUT stripping thinking blocks.
+
+    Use this for structured-output tasks (e.g. Verification Factory)
+    where the model may embed the JSON inside its <think> block.
+    Returns the full raw output including any <think>...</think> content.
+    """
+    messages = [{"role": "user", "content": user_msg}]
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    device = next(model.parameters()).device
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            do_sample=(temp > 0),
+            temperature=temp if temp > 0 else 1.0,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+
+    prompt_len = inputs["input_ids"].shape[1]
+    new_tokens = output_ids[0, prompt_len:]
+    return tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+
 def chat_generate(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizerBase,
