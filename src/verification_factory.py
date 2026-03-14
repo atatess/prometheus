@@ -65,6 +65,10 @@ CRITICAL: The verifier must use pure Python (math, itertools, re, collections, e
 No external APIs, no file I/O, no network access.
 """
 
+# Token budget for factory generation — needs more room than regular inference
+# (full JSON with verifier code + 5 test examples is 800-1200 tokens)
+FACTORY_MAX_TOKENS = 2500
+
 # Candidate domains for expansion
 EXPANSION_CANDIDATES = [
     {
@@ -134,14 +138,28 @@ class VerificationFactory:
         return FACTORY_PROMPT.format(domain=domain, description=description)
 
     def parse_verifier(self, raw_output: str) -> Optional[DomainVerifier]:
-        """Parse the model's output into a DomainVerifier."""
-        try:
-            text = raw_output.strip()
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0]
-            elif "```" in text:
-                text = text.split("```")[1].split("```")[0]
+        """Parse the model's output into a DomainVerifier.
+        
+        Robust parsing: handles markdown code fences, truncated JSON,
+        and partial outputs from models with limited token budgets.
+        """
+        import re as _re
 
+        text = raw_output.strip()
+
+        # 1. Extract from markdown code fences
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+        else:
+            # Find the JSON object — look for the opening brace
+            brace_idx = text.find("{")
+            if brace_idx != -1:
+                text = text[brace_idx:]
+
+        # 2. Try clean parse first
+        try:
             data = json.loads(text)
             return DomainVerifier(
                 domain=data["domain"],
@@ -150,8 +168,39 @@ class VerificationFactory:
                 proposer_template=data["proposer_template"],
                 test_examples=data.get("test_examples", []),
             )
-        except (json.JSONDecodeError, KeyError) as e:
-            print(f"Failed to parse verifier output: {e}")
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+        # 3. Truncated JSON recovery — extract key fields individually
+        # This handles cases where max_new_tokens cuts off the JSON mid-way
+        print("  ⚠️  JSON parse failed, attempting field extraction...")
+        try:
+            # Extract domain
+            domain_m = _re.search(r'"domain"\s*:\s*"([^"]+)"', text)
+            desc_m = _re.search(r'"description"\s*:\s*"([^"]+)"', text)
+            # Extract verifier_code (may span multiple lines)
+            code_m = _re.search(r'"verifier_code"\s*:\s*"((?:[^"\\]|\\.)*)\"', text, _re.DOTALL)
+            tmpl_m = _re.search(r'"proposer_template"\s*:\s*"((?:[^"\\]|\\.)*)\"', text, _re.DOTALL)
+
+            if not (domain_m and code_m):
+                print(f"  ❌ Could not extract required fields from output")
+                return None
+
+            domain = domain_m.group(1)
+            description = desc_m.group(1) if desc_m else domain
+            verifier_code = code_m.group(1).replace("\\n", "\n").replace('\\"', '"')
+            proposer_template = tmpl_m.group(1).replace("\\n", "\n").replace('\\"', '"') if tmpl_m else ""
+
+            print(f"  ✅ Extracted verifier for domain '{domain}' (no test examples)")
+            return DomainVerifier(
+                domain=domain,
+                description=description,
+                verifier_code=verifier_code,
+                proposer_template=proposer_template,
+                test_examples=[],  # May be empty if output was truncated
+            )
+        except Exception as e:
+            print(f"  ❌ Field extraction also failed: {e}")
             return None
 
     def validate_verifier(
