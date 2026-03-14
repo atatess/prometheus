@@ -110,17 +110,40 @@ for candidate in test_candidates:
     print("   " + verifier.verifier_code[:300].replace("\n", "\n   "))
     print(f"   Test examples: {len(verifier.test_examples)}")
 
-    # Validate against test examples
-    if verifier.test_examples:
-        print("   Running validation...")
+    # Validate — with up to 2 retries
+    valid = False
+    for attempt in range(3):
+        if not verifier.test_examples:
+            print("   ⚠️  No test examples — skipping validation")
+            break
+
+        print(f"   Running validation (attempt {attempt+1}/3)...")
         valid = factory.validate_verifier(verifier, sandbox)
         print(f"   Validation: {'✅ PASSED' if valid else '❌ FAILED'} ({verifier.accuracy_on_tests:.0%} accuracy)")
+
         if valid:
             factory.register_verifier(verifier)
             print(f"   💾 Registered domain '{domain}' to curriculum")
-    else:
-        print("   ⚠️  No test examples — skipping validation")
-        valid = False
+            break
+
+        if attempt < 2:
+            # Get failing cases and retry
+            failing = factory.get_failing_cases(verifier, sandbox)
+            if not failing:
+                print("   No specific failures found — stopping retries")
+                break
+            print(f"   🔄 Retrying with {len(failing)} failing cases shown to model...")
+            retry_prompt = factory.build_retry_prompt(verifier, failing)
+
+            if USE_CUDA:
+                messages = [{"role": "user", "content": retry_prompt}]
+                formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                inputs = tokenizer(formatted, return_tensors="pt").to("cuda")
+                with torch.no_grad():
+                    out = model.generate(**inputs, max_new_tokens=2000, do_sample=True, temperature=0.2,
+                                        pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+                raw = tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+            verifier = factory.parse_verifier(raw) or verifier
 
     results.append({
         "domain": domain,

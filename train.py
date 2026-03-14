@@ -196,15 +196,18 @@ def run_experiment(config: dict, experiment_dir: Path):
             remaining = trainer.generate_rollouts_n(solver_prompt, n=grpo_config.group_size - 1)
             responses = probe_responses + remaining
         
-        # Strip thinking from responses for answer extraction
-        clean_responses = [strip_thinking(r) for r in responses]
-        solutions = [parse_solution(r, problem.domain) for r in clean_responses]
-        
+        # Parse answers from RAW responses — parse_solution searches for ANSWER:
+        # in the full text including thinking blocks, which is more accurate than
+        # stripping thinking first and losing the ANSWER: marker.
+        solutions = [parse_solution(r, problem.domain) for r in responses]
+        # Clean responses for GRPO loss computation (shorter = more stable gradients)
+        clean_responses = [strip_thinking(r) if strip_thinking(r) else r for r in responses]
+
         # 4. Verify each solution
         actual_domain = problem.domain  # Use problem's domain, not curriculum's
         expected = problem.metadata.get("expected_answer", "?")
         print(f"  📊 Expected: {expected}")
-        for i, (sol, raw) in enumerate(zip(solutions, clean_responses)):
+        for i, (sol, raw) in enumerate(zip(solutions, responses)):
             print(f"     Rollout {i}: answer='{sol.answer}' (from: '{raw[:60]}...')")
         
         rewards = []

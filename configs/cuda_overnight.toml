@@ -1,0 +1,42 @@
+# Prometheus — Overnight run config (8 hours)
+# All critical fixes applied:
+# - Per-token log_prob normalization (stable loss)
+# - LR 2e-6 (was 5e-6, too high)
+# - max_grad_norm 0.5 (was 0.1, too aggressive)
+# - group_size 8 (more diverse rollouts → better GRPO estimates)
+# Run: PROMETHEUS_BACKEND=cuda python train.py --config configs/cuda_overnight.toml
+
+[model]
+name = "/root/models/qwen3.5-4b"
+lora_rank = 8
+lora_alpha = 16
+lora_targets = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+[training]
+method = "grpo"
+group_size = 8              # More rollouts → more stable advantage estimates
+learning_rate = 2e-6        # Lower — 5e-6 was causing loss spikes
+weight_decay = 0.01
+max_new_tokens = 512
+time_budget_minutes = 480   # 8 hours
+warmup_steps = 20           # Gentler warmup
+grad_accumulation_steps = 2
+max_seq_len = 2048
+max_grad_norm = 0.5         # Wider than 0.1 — lets gradients flow
+
+[curriculum]
+initial_domains = ["math", "code"]
+enable_verification_factory = true
+frontier_band = [0.3, 0.8]
+problems_per_round = 32
+max_domain_saturation = 0.85
+
+[meta]
+enable_domain_expansion = true
+enable_autoresearch = false
+benchmark_interval = 50
+checkpoint_interval = 10
+
+[sandbox]
+timeout_seconds = 30
+max_memory_mb = 512

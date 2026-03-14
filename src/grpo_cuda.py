@@ -39,15 +39,15 @@ from transformers import (
 class GRPOConfig:
     """Configuration for GRPO training — identical fields to the MLX version."""
     group_size: int = 4
-    learning_rate: float = 1e-6
-    weight_decay: float = 0.0
-    max_new_tokens: int = 2000
+    learning_rate: float = 2e-6     # Lower default — 5e-6 was causing spikes
+    weight_decay: float = 0.01
+    max_new_tokens: int = 512
     temperature: float = 0.7
     kl_coeff: float = 0.04          # Kept for API parity; not used (no ref model)
     clip_eps: float = 0.2           # Kept for API parity; not used (vanilla PG)
     max_seq_len: int = 2048
     gradient_accumulation_steps: int = 4
-    max_grad_norm: float = 0.1
+    max_grad_norm: float = 0.5      # Raised — 0.1 was too aggressive, killing signal
     warmup_ratio: float = 0.1
 
 
@@ -131,7 +131,11 @@ def calculate_log_probs(
     gathered = log_probs[0, logit_positions, target_ids]
     # shape: [comp_len]
 
-    return gathered.sum()
+    # Normalize by completion length — makes loss scale-invariant regardless of
+    # how many thinking tokens the model generates. Without this, a 500-token
+    # thinking response has 50x higher loss than a 10-token answer, causing
+    # massive gradient variance and training instability.
+    return gathered.mean()
 
 
 # ---------------------------------------------------------------------------
