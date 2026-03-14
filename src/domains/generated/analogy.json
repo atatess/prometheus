@@ -1,0 +1,22 @@
+{
+  "domain": "analogy",
+  "description": "Analogical reasoning \u2014 completing A:B::C:? patterns, identifying structural similarities between domains",
+  "verifier_code": "def verify(problem_data, answer):\n            # problem_data always has key \"expected_answer\"\n            # answer is a string\n            # Return True if correct, False otherwise\n            # Use only: math, re, json, itertools \u2014 no other imports\n            expected = str(problem_data.get(\"expected_answer\", \"\")).strip()\n            ans = str(answer).strip()\n            try:\n                return abs(float(ans) - float(expected)) < 0.01\n            except:\n                return ans.lower() == expected.lower()",
+  "proposer_template": "Generate a analogy problem.\nPROBLEM: ...\nANSWER: ...",
+  "test_examples": [
+    {
+      "correct_answer": "yes",
+      "incorrect_answer": "no"
+    },
+    {
+      "correct_answer": "1",
+      "incorrect_answer": "0"
+    },
+    {
+      "correct_answer": "true",
+      "incorrect_answer": "false"
+    }
+  ],
+  "validated": true,
+  "accuracy_on_tests": 1.0
+}

@@ -1,0 +1,22 @@
+{
+  "domain": "planning",
+  "description": "Sequential planning \u2014 ordering steps, choosing optimal action sequences, scheduling tasks in the right order",
+  "verifier_code": "def verify(problem_data, answer):\n    exp = str(problem_data.get('expected_answer','')).strip()\n    ans = str(answer).strip()\n    # Normalize whitespace for comparison\n    exp_clean = ' '.join(exp.split())\n    ans_clean = ' '.join(ans.split())\n    # Handle list format if needed\n    try:\n        exp_list = [item.strip() for item in exp_clean.split(',')]\n        ans_list = [item.strip() for item in ans_clean.split(',')]\n        if len(exp_list) != len(ans_list):\n            return False\n        return exp_list == ans_list\n    except:\n        return exp_clean == ans_clean",
+  "proposer_template": "Generate a planning problem with a sequence of steps.\nPROBLEM: <task description that requires multiple steps in correct order>\nANSWER: <comma-separated list of steps in correct order>",
+  "test_examples": [
+    {
+      "correct_answer": "open door, take key, lock door",
+      "incorrect_answer": "lock door, take key, open door"
+    },
+    {
+      "correct_answer": "prepare ingredients, cook food, serve food",
+      "incorrect_answer": "serve food, cook food, prepare ingredients"
+    },
+    {
+      "correct_answer": "check weather, pack umbrella, go outside",
+      "incorrect_answer": "go outside, check weather, pack umbrella"
+    }
+  ],
+  "validated": true,
+  "accuracy_on_tests": 1.0
+}
