@@ -50,7 +50,7 @@ The verifier function signature:
   - Use ONLY stdlib: math, re, json, itertools
 
 COMPLETE EXAMPLE (arithmetic domain):
-{"domain":"arithmetic","description":"Basic arithmetic","verifier_code":"def verify(problem_data, answer):\\n    exp = str(problem_data.get('expected_answer','')).strip()\\n    ans = str(answer).strip()\\n    try:\\n        return abs(float(ans) - float(exp)) < 0.01\\n    except:\\n        return ans.lower() == exp.lower()","proposer_template":"Generate an arithmetic problem.\\nPROBLEM: <problem statement>\\nANSWER: <numeric answer>","test_examples":[{"correct_answer":"42","incorrect_answer":"41"},{"correct_answer":"7","incorrect_answer":"8"},{"correct_answer":"100","incorrect_answer":"99"}]}
+{{"domain":"arithmetic","description":"Basic arithmetic","verifier_code":"def verify(problem_data, answer):\\n    exp = str(problem_data.get('expected_answer','')).strip()\\n    ans = str(answer).strip()\\n    try:\\n        return abs(float(ans) - float(exp)) < 0.01\\n    except:\\n        return ans.lower() == exp.lower()","proposer_template":"Generate an arithmetic problem.\\nPROBLEM: <problem statement>\\nANSWER: <numeric answer>","test_examples":[{{"correct_answer":"42","incorrect_answer":"41"}},{{"correct_answer":"7","incorrect_answer":"8"}},{{"correct_answer":"100","incorrect_answer":"99"}}]}}
 
 Now write a verifier for:
 Domain: {domain}
@@ -78,7 +78,7 @@ The most common bugs:
   - Crashes on wrong input → add try/except, return False on error
 
 Rewrite the entire JSON with a fixed verifier_code:
-{"domain":"{domain}","description":"{description}","verifier_code":"def verify(problem_data, answer):\\n    ...","proposer_template":"...","test_examples":[...]}"""
+{{"domain":"{domain}","description":"{description}","verifier_code":"def verify(problem_data, answer):\\n    ...","proposer_template":"...","test_examples":[...]}}"""
 
 # Token budget — factory JSON needs ~800-1500 tokens of output
 FACTORY_MAX_TOKENS = 2000
