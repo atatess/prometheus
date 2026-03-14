@@ -284,12 +284,39 @@ class VerificationFactory:
         if best:
             return best
 
-        # 2b. Text format — VERIFIER: ```python ... ``` + CORRECT_ANSWER / WRONG_ANSWER
+        # 2b. Text/completion format — the FACTORY_PROMPT ends with "```python" so
+        # the model COMPLETES the block starting with "def verify..." directly.
+        # Also handles full ```python...``` blocks if present.
         code_match = _re.search(r'```python\s*\n(.*?)```', text, _re.DOTALL)
         if not code_match:
             code_match = _re.search(r'```\s*\n(def verify.*?)```', text, _re.DOTALL)
+
+        # Completion case: model output starts with def verify (prompt had opening ```)
+        direct_fn = None
+        if 'def verify' in text:
+            def_start = text.index('def verify')
+            # Code ends at the closing ``` or next non-indented non-def block
+            close_tick = text.find('\n```', def_start)
+            if close_tick > 0:
+                direct_fn = text[def_start:close_tick].strip()
+            else:
+                # No closing ```, take up to PROPOSER_TEMPLATE or CORRECT_ANSWER
+                end_markers = ['PROPOSER_TEMPLATE:', 'CORRECT_ANSWER:', '\n\n\n']
+                end_pos = len(text)
+                for marker in end_markers:
+                    pos = text.find(marker, def_start)
+                    if pos > def_start:
+                        end_pos = min(end_pos, pos)
+                direct_fn = text[def_start:end_pos].strip()
+
+        code_str = None
         if code_match:
-            code = code_match.group(1).strip()
+            code_str = code_match.group(1).strip()
+        elif direct_fn and 'def verify' in direct_fn:
+            code_str = direct_fn
+
+        if code_str:
+            code = code_str
             if 'def verify' in code:
                 corrects = _re.findall(r'CORRECT_ANSWER:\s*(.+)', text)
                 wrongs = _re.findall(r'WRONG_ANSWER:\s*(.+)', text)
