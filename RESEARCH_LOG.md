@@ -93,11 +93,28 @@
 
 **Observation:** Loss is NOT consistently trending down — it spikes to 44 at step 26 after being at 14. This is normal for RL (high variance). Need 50+ training updates to see a real trend, not just 10.
 
-**Planned changes after this run:**
-- [ ] Add loss-per-step JSON tracking to results file (currently only avg)
-- [ ] Log which specific problems are being sampled (helps diagnose curriculum)
-- [ ] Increase time budget to 3-4 hours for a real training signal
-- [ ] Consider `group_size=8` to get more diverse rollouts per step (L40S has headroom)
+**Final results (COMPLETE):**
+- 41 steps, 14 training updates, 61 min
+- Overall accuracy 14.3%, avg loss 26.35
+- Domain accuracy: Science 60%, Data 50%, Math 47%, Logic/Spatial 25%, Code 0%
+- **Last 4 steps: ALL "Failed to parse problem"** — seed problems ran out, proposer output not being parsed
+
+**Root causes found + fixed:**
+1. `parse_proposed_problem` only stripped `<think>` format — missed `Thinking Process:` → problem text discarded
+2. JSON regex `\{[^{}]+\}` can't handle nested braces — code domain JSON always failed
+3. Model completes prompt directly (no "PROBLEM:" prefix in output) — wasn't matching
+
+**Fixes applied:**
+- Scan full raw text (don't strip thinking), keep content from both thinking formats
+- Replaced shallow JSON regex with proper brace-balanced scanner
+- Added direct continuation matcher for prompts ending with "PROBLEM:"
+- Code domain should now parse correctly
+
+**Planned for next run:**
+- [ ] Increase time budget to 3-4 hours (more steps needed to see clear learning signal)
+- [ ] Add per-step loss tracking to results.json (currently only avg)
+- [ ] `group_size=6` — L40S has headroom, more rollout diversity per step
+- [ ] Verify proposer parse fix worked (should see 0 "Failed to parse" errors)
 
 ---
 

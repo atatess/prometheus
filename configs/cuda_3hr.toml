@@ -1,0 +1,30 @@
+[model]
+name = "/root/models/qwen3.5-4b"
+lora_rank = 8
+lora_alpha = 16
+
+[training]
+method = "grpo"
+group_size = 6
+learning_rate = 5e-6
+weight_decay = 0.01
+max_new_tokens = 512
+time_budget_minutes = 180
+warmup_steps = 15
+grad_accumulation_steps = 2
+max_seq_len = 2048
+
+[curriculum]
+initial_domains = ["math", "code"]
+enable_verification_factory = true
+frontier_band = [0.3, 0.8]
+problems_per_round = 32
+max_domain_saturation = 0.85
+
+[meta]
+enable_domain_expansion = true
+enable_autoresearch = false
+
+[sandbox]
+timeout_seconds = 30
+max_memory_mb = 512
