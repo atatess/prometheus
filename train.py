@@ -43,7 +43,7 @@ if _USE_CUDA:
     # ---------- CUDA / PyTorch imports -------------------------------------
     import torch
     from src.grpo_cuda import GRPOConfig, GRPOTrainer
-    from src.model_utils_cuda import chat_generate, strip_thinking
+    from src.model_utils_cuda import chat_generate, raw_generate, strip_thinking
     from src.load_model_cuda import load_model_cuda as load
 else:
     # ---------- MLX imports (macOS / Apple Silicon) -----------------------
@@ -157,17 +157,13 @@ def run_experiment(config: dict, experiment_dir: Path):
             print(f"  🌱 Seed problem [{problem.domain}]")
         else:
             proposer_prompt = build_proposer_prompt(domain, difficulty)
-            # IMPORTANT: Disable LoRA adapters for problem generation.
-            # GRPO training shifts the solver model toward FINAL_ANSWER: format,
-            # which breaks JSON/PROBLEM:/ANSWER: proposer output format.
-            # Using the base model (adapter-off) keeps proposer stable.
+            # IMPORTANT: Use raw_generate (NOT chat_generate) for proposer.
+            # Qwen3.5-4B embeds its PROBLEM:/ANSWER: output inside <think> blocks.
+            # chat_generate strips thinking → loses the problem content entirely.
+            # raw_generate returns the full output including thinking, and
+            # parse_proposed_problem already handles <think> content correctly.
             if _USE_CUDA:
-                # disable_adapters() is PEFT's context manager (note plural)
-                if hasattr(model, 'disable_adapters'):
-                    with model.disable_adapters():
-                        raw_problem = chat_generate(model, tokenizer, proposer_prompt, max_tokens=2000)
-                else:
-                    raw_problem = chat_generate(model, tokenizer, proposer_prompt, max_tokens=2000)
+                raw_problem = raw_generate(model, tokenizer, proposer_prompt, max_tokens=1500)
             else:
                 raw_problem = chat_generate(model, tokenizer, proposer_prompt, max_tokens=2000)
             problem = parse_proposed_problem(domain, raw_problem)
