@@ -96,15 +96,9 @@ for candidate in test_candidates:
     print(f"   Raw output length: {len(raw)} chars")
     print(f"   First 200 chars: {repr(raw[:200])}")
 
-    # Strip thinking before parsing
-    cleaned = strip_thinking(raw)
-    print(f"   After strip_thinking: {len(cleaned)} chars")
-
-    # Parse
-    verifier = factory.parse_verifier(cleaned)
-    if verifier is None:
-        # Try on raw too (thinking block might contain the JSON)
-        verifier = factory.parse_verifier(raw)
+    # Pass raw directly — parse_verifier handles all thinking formats internally
+    # DO NOT strip_thinking here: the JSON is often inside the thinking block
+    verifier = factory.parse_verifier(raw)
 
     if verifier is None:
         print(f"   ❌ FAILED to parse verifier")

@@ -139,74 +139,114 @@ class VerificationFactory:
 
     def parse_verifier(self, raw_output: str) -> Optional[DomainVerifier]:
         """Parse the model's output into a DomainVerifier.
-        
-        Robust parsing: handles markdown code fences, truncated JSON,
-        and partial outputs from models with limited token budgets.
+
+        Robust parsing strategy:
+        1. Strip all thinking wrappers (<think> tags, "Thinking Process:" headers)
+           to work on the full flattened text
+        2. Try markdown code fences first (```json...```)
+        3. Try ALL JSON objects in the text (scan every '{', pick largest valid one)
+        4. Fall back to regex field extraction for truncated output
         """
         import re as _re
 
+        # --- Flatten text: remove all thinking wrappers ---
         text = raw_output.strip()
+        text = text.replace("<think>", "").replace("</think>", "")
+        # Strip "Thinking Process:" header lines — keep the content
+        text = _re.sub(r'^Thinking Process:\s*\n', '', text, flags=_re.MULTILINE)
 
-        # 0. Search inside <think>...</think> blocks too —
-        #    the model sometimes generates the JSON during thinking
-        if "<think>" in text:
-            # Take everything (thinking + answer) — JSON could be anywhere
-            text = text.replace("<think>", "").replace("</think>", "")
-
-        # 1. Extract from markdown code fences
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-        elif "```" in text:
-            text = text.split("```")[1].split("```")[0].strip()
-        else:
-            # Find the JSON object — look for the opening brace of the root object
-            brace_idx = text.find("{")
-            if brace_idx != -1:
-                text = text[brace_idx:]
-
-        # 2. Try clean parse first
-        try:
-            data = json.loads(text)
-            return DomainVerifier(
-                domain=data["domain"],
-                description=data["description"],
-                verifier_code=data["verifier_code"],
-                proposer_template=data["proposer_template"],
-                test_examples=data.get("test_examples", []),
-            )
-        except (json.JSONDecodeError, KeyError):
-            pass
-
-        # 3. Truncated JSON recovery — extract key fields individually
-        # This handles cases where max_new_tokens cuts off the JSON mid-way
-        print("  ⚠️  JSON parse failed, attempting field extraction...")
-        try:
-            # Extract domain
-            domain_m = _re.search(r'"domain"\s*:\s*"([^"]+)"', text)
-            desc_m = _re.search(r'"description"\s*:\s*"([^"]+)"', text)
-            # Extract verifier_code (may span multiple lines)
-            code_m = _re.search(r'"verifier_code"\s*:\s*"((?:[^"\\]|\\.)*)\"', text, _re.DOTALL)
-            tmpl_m = _re.search(r'"proposer_template"\s*:\s*"((?:[^"\\]|\\.)*)\"', text, _re.DOTALL)
-
-            if not (domain_m and code_m):
-                print(f"  ❌ Could not extract required fields from output")
+        def _try_parse(candidate: str) -> Optional[DomainVerifier]:
+            """Try to parse a JSON string into a DomainVerifier."""
+            try:
+                data = json.loads(candidate)
+                if "verifier_code" not in data:
+                    return None
+                return DomainVerifier(
+                    domain=data.get("domain", "unknown"),
+                    description=data.get("description", ""),
+                    verifier_code=data["verifier_code"],
+                    proposer_template=data.get("proposer_template", ""),
+                    test_examples=data.get("test_examples", []),
+                )
+            except (json.JSONDecodeError, KeyError):
                 return None
 
-            domain = domain_m.group(1)
-            description = desc_m.group(1) if desc_m else domain
+        # 1. Markdown code fences (highest confidence)
+        if "```json" in text:
+            candidate = text.split("```json")[1].split("```")[0].strip()
+            result = _try_parse(candidate)
+            if result:
+                return result
+        if "```" in text:
+            for block in text.split("```")[1::2]:  # odd-indexed = code blocks
+                result = _try_parse(block.strip())
+                if result:
+                    return result
+
+        # 2. Scan ALL '{' positions — try each as root JSON, keep largest valid
+        best: Optional[DomainVerifier] = None
+        best_len = 0
+        for m in _re.finditer(r'\{', text):
+            candidate = text[m.start():]
+            # Walk forward to find the matching closing brace
+            depth = 0
+            end = -1
+            in_string = False
+            escape = False
+            for i, ch in enumerate(candidate):
+                if escape:
+                    escape = False
+                    continue
+                if ch == '\\' and in_string:
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            if end == -1:
+                continue
+            result = _try_parse(candidate[:end])
+            if result and end > best_len:
+                best = result
+                best_len = end
+
+        if best:
+            return best
+
+        # 3. Truncated JSON recovery — regex field extraction
+        print("  ⚠️  JSON parse failed, attempting field extraction...")
+        try:
+            domain_m = _re.search(r'"domain"\s*:\s*"([^"]+)"', text)
+            desc_m = _re.search(r'"description"\s*:\s*"([^"]+)"', text)
+            code_m = _re.search(r'"verifier_code"\s*:\s*"((?:[^"\\]|\\.)*)"', text, _re.DOTALL)
+            tmpl_m = _re.search(r'"proposer_template"\s*:\s*"((?:[^"\\]|\\.)*)"', text, _re.DOTALL)
+
+            if not (domain_m and code_m):
+                print("  ❌ Could not extract required fields from output")
+                return None
+
             verifier_code = code_m.group(1).replace("\\n", "\n").replace('\\"', '"')
             proposer_template = tmpl_m.group(1).replace("\\n", "\n").replace('\\"', '"') if tmpl_m else ""
 
-            print(f"  ✅ Extracted verifier for domain '{domain}' (no test examples)")
+            print(f"  ✅ Extracted verifier for '{domain_m.group(1)}' via regex (no test examples)")
             return DomainVerifier(
-                domain=domain,
-                description=description,
+                domain=domain_m.group(1),
+                description=desc_m.group(1) if desc_m else domain_m.group(1),
                 verifier_code=verifier_code,
                 proposer_template=proposer_template,
-                test_examples=[],  # May be empty if output was truncated
+                test_examples=[],
             )
         except Exception as e:
-            print(f"  ❌ Field extraction also failed: {e}")
+            print(f"  ❌ Field extraction failed: {e}")
             return None
 
     def validate_verifier(
