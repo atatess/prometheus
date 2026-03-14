@@ -5,11 +5,42 @@ Drop-in replacement for model_utils.py.
 Same public API: chat_generate(), strip_thinking()
 """
 
+import re
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
-# strip_thinking is pure Python — no MLX dependency, reuse as-is.
-from .model_utils import strip_thinking  # noqa: F401  (re-exported)
+
+def strip_thinking(text: str) -> str:
+    """Strip thinking blocks from model output (pure Python, no framework deps)."""
+    if "<think>" in text and "</think>" in text:
+        after = text.split("</think>")[-1].strip()
+        if after:
+            return after
+    json_matches = re.findall(r'\{[^{}]*"prompt"[^{}]*\}', text)
+    if json_matches:
+        return json_matches[-1]
+    json_matches = re.findall(r'\{[^{}]*"[^"]+"\s*:[^{}]*\}', text)
+    if json_matches:
+        return json_matches[-1]
+    NUM = r'-?\d+(?:\.\d+)?(?:/\d+)?'
+    answer_matches = re.findall(rf'ANSWER:\s*({NUM})', text)
+    if answer_matches:
+        return answer_matches[-1]
+    answer_matches = re.findall(rf'(?:answer|result)\s+(?:is|=)\s*:?\s*({NUM})', text, re.IGNORECASE)
+    if answer_matches:
+        return answer_matches[-1]
+    fractions = re.findall(r'(?:^|\s)(\d+/\d+)(?:\s|$|\.)', text)
+    if fractions:
+        return fractions[-1]
+    boxed2 = re.findall(r'\\boxed\{([^}]+)\}', text)
+    if boxed2:
+        return boxed2[-1].strip()
+    lines = text.strip().split('\n')
+    for line in reversed(lines):
+        line = line.strip().rstrip('.')
+        if re.match(rf'^{NUM}$', line):
+            return line
+    return text.strip()
 
 
 def chat_generate(
