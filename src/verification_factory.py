@@ -40,28 +40,48 @@ class DomainVerifier:
 # Prompt: kept intentionally short so small (4B) models don't lose the format
 # ─────────────────────────────────────────────────────────────────────────────
 
-FACTORY_PROMPT = """Write a Python verifier for a reasoning domain. Output ONLY valid JSON.
+FACTORY_PROMPT = """Write a Python verifier for the domain below. Use EXACTLY this format:
 
-The verifier function signature:
-  def verify(problem_data: dict, answer: str) -> bool
-  - problem_data ALWAYS has an "expected_answer" key
-  - answer is the model's answer (string)
-  - Return True if correct, False otherwise
-  - Use ONLY stdlib: math, re, json, itertools
+DOMAIN: {domain}
+DESCRIPTION: {description}
 
-COMPLETE EXAMPLE (arithmetic domain):
-{{"domain":"arithmetic","description":"Basic arithmetic","verifier_code":"def verify(problem_data, answer):\\n    exp = str(problem_data.get('expected_answer','')).strip()\\n    ans = str(answer).strip()\\n    try:\\n        return abs(float(ans) - float(exp)) < 0.01\\n    except:\\n        return ans.lower() == exp.lower()","proposer_template":"Generate an arithmetic problem.\\nPROBLEM: <problem statement>\\nANSWER: <numeric answer>","test_examples":[{{"correct_answer":"42","incorrect_answer":"41"}},{{"correct_answer":"7","incorrect_answer":"8"}},{{"correct_answer":"100","incorrect_answer":"99"}}]}}
+VERIFIER:
+```python
+def verify(problem_data, answer):
+    # problem_data always has key "expected_answer"
+    # answer is a string
+    # Return True if correct, False otherwise
+    # Use only: math, re, json, itertools — no other imports
+    expected = str(problem_data.get("expected_answer", "")).strip()
+    ans = str(answer).strip()
+    try:
+        return abs(float(ans) - float(expected)) < 0.01
+    except:
+        return ans.lower() == expected.lower()
+```
 
-Now write a verifier for:
-Domain: {domain}
-Description: {description}
+PROPOSER_TEMPLATE:
+Generate a {domain} problem.
+PROBLEM: <problem statement here>
+ANSWER: <answer here>
 
-Requirements:
-- verifier_code must define: def verify(problem_data, answer) -> bool
-- test_examples must have "correct_answer" and "incorrect_answer" (at least 3 pairs)
-- proposer_template must show how to generate problems for this domain
+CORRECT_ANSWER: 42
+WRONG_ANSWER: 43
 
-Output ONLY the JSON object, nothing else:"""
+CORRECT_ANSWER: yes
+WRONG_ANSWER: no
+
+CORRECT_ANSWER: 7
+WRONG_ANSWER: 5
+
+---
+Now write your verifier for: {domain} — {description}
+
+DOMAIN: {domain}
+DESCRIPTION: {description}
+
+VERIFIER:
+```python"""
 
 FACTORY_RETRY_PROMPT = """Your verifier for "{domain}" failed: {accuracy:.0%} accuracy on {total} checks.
 
@@ -81,7 +101,7 @@ Rewrite the entire JSON with a fixed verifier_code:
 {{"domain":"{domain}","description":"{description}","verifier_code":"def verify(problem_data, answer):\\n    ...","proposer_template":"...","test_examples":[...]}}"""
 
 # Token budget — factory JSON needs ~800-1500 tokens of output
-FACTORY_MAX_TOKENS = 2000
+FACTORY_MAX_TOKENS = 3500  # thinking model needs ~2000 for <think> + 800 for verifier
 
 # Candidate domains for expansion
 EXPANSION_CANDIDATES = [
@@ -186,7 +206,7 @@ class VerificationFactory:
     def build_factory_prompt(self, domain: str, description: str) -> str:
         return FACTORY_PROMPT.format(domain=domain, description=description)
 
-    def parse_verifier(self, raw_output: str) -> Optional[DomainVerifier]:
+    def parse_verifier(self, raw_output: str, domain: str = "unknown", description: str = "") -> Optional[DomainVerifier]:
         """Parse model output into a DomainVerifier.
 
         Strategy:
@@ -263,6 +283,33 @@ class VerificationFactory:
 
         if best:
             return best
+
+        # 2b. Text format — VERIFIER: ```python ... ``` + CORRECT_ANSWER / WRONG_ANSWER
+        code_match = _re.search(r'```python\s*\n(.*?)```', text, _re.DOTALL)
+        if not code_match:
+            code_match = _re.search(r'```\s*\n(def verify.*?)```', text, _re.DOTALL)
+        if code_match:
+            code = code_match.group(1).strip()
+            if 'def verify' in code:
+                corrects = _re.findall(r'CORRECT_ANSWER:\s*(.+)', text)
+                wrongs = _re.findall(r'WRONG_ANSWER:\s*(.+)', text)
+                examples = [
+                    {"correct_answer": c.strip(), "incorrect_answer": w.strip()}
+                    for c, w in zip(corrects, wrongs)
+                ]
+                proposer_m = _re.search(r'PROPOSER_TEMPLATE:\s*\n(.*?)(?:\nCORRECT_ANSWER|\Z)', text, _re.DOTALL)
+                proposer = proposer_m.group(1).strip() if proposer_m else f"Generate a {domain} problem.\nPROBLEM: ...\nANSWER: ..."
+                return DomainVerifier(
+                    domain=domain,
+                    description=description,
+                    verifier_code=code,
+                    proposer_template=proposer,
+                    test_examples=examples if examples else [
+                        {"correct_answer": "yes", "incorrect_answer": "no"},
+                        {"correct_answer": "1", "incorrect_answer": "0"},
+                        {"correct_answer": "true", "incorrect_answer": "false"},
+                    ],
+                )
 
         # 3. Regex field extraction for truncated output
         print("  ⚠️  JSON parse failed, attempting field extraction...")
@@ -484,7 +531,7 @@ class VerificationFactory:
             elapsed = time.monotonic() - t0
             print(f"   Generated {len(raw_output)} chars in {elapsed:.1f}s")
 
-            verifier = self.parse_verifier(raw_output)
+            verifier = self.parse_verifier(raw_output, domain=domain, description=description)
             if verifier is None:
                 print("   ❌ Parse failed")
                 continue
