@@ -20,12 +20,8 @@ SOLVER_PROMPT = """Solve this problem. Think carefully, then give your answer.
 FINAL_ANSWER: [write only the answer here, nothing else]
 """
 
-CODE_SOLVER_PROMPT = """You are solving a coding problem. Write a Python function that solves it.
-
-{problem_prompt}
-
-Write ONLY the function implementation. Do not include test cases.
-"""
+# Code domain uses the same answer format — "what does this print?" = numeric answer.
+# Do NOT use a code-writing prompt for code domain seed problems.
 
 
 @dataclass
@@ -38,12 +34,11 @@ class Solution:
 
 
 def build_solver_prompt(problem: Problem) -> str:
-    """Build a prompt for the solver model."""
-    if problem.domain == "code":
-        return CODE_SOLVER_PROMPT.format(
-            problem_prompt=problem.prompt,
-        )
+    """Build a prompt for the solver model.
     
+    All domains (including code) use SOLVER_PROMPT — our code problems are
+    'what does this print?' questions with a numeric answer, not code-writing tasks.
+    """
     format_hint = ""
     if problem.solution_hint:
         format_hint = f"Answer format: {problem.solution_hint}"
@@ -145,9 +140,8 @@ def parse_solution(raw_response: str, domain: str) -> Solution:
         except IndexError:
             pass
     
-    # For code problems, the code IS the answer
-    if domain == "code" and code:
-        answer = code
+    # NOTE: code domain answers are NUMBERS (output of code), not code blocks.
+    # Do not use extracted code blocks as the answer for any domain.
     
     # Fallback: extract last number/fraction from text (for math)
     if domain in ("math", "logic", "spatial", "science", "data") and answer == text:
