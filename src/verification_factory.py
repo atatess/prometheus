@@ -7,15 +7,20 @@ verifiable rewards by writing domain-specific Python verifiers.
 The key insight: verification is always easier than generation.
 A model that can't solve a problem CAN often write a program that
 checks whether a given answer is correct.
+
+Layer 2 Pipeline:
+  1. Model generates a verify(problem_data, answer) -> bool function
+  2. We exec() it and test against simple correct/incorrect pairs
+  3. If accuracy >= 60% → register domain in curriculum
+  4. Training loop uses the verifier as a reward signal
 """
 
 import json
-import importlib.util
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 from dataclasses import dataclass, field
 
-from .verifier import verify_code_task, SandboxConfig
 from .proposer import register_domain
 
 
@@ -31,166 +36,173 @@ class DomainVerifier:
     accuracy_on_tests: float = 0.0
 
 
-FACTORY_PROMPT = """You are designing a verification system for a new reasoning domain.
+# ─────────────────────────────────────────────────────────────────────────────
+# Prompt: kept intentionally short so small (4B) models don't lose the format
+# ─────────────────────────────────────────────────────────────────────────────
 
-Here is an example of a GOOD verifier (for arithmetic):
-```json
-{{
-    "domain": "arithmetic",
-    "description": "Basic arithmetic: addition, subtraction, multiplication, division",
-    "verifier_code": "def verify(problem_data, answer):\\n    expected = problem_data.get('expected_answer', '')\\n    try:\\n        return abs(float(str(answer).strip()) - float(str(expected).strip())) < 0.01\\n    except (ValueError, TypeError):\\n        return str(answer).strip() == str(expected).strip()",
-    "proposer_template": "Generate an arithmetic problem. Output:\\nPROBLEM: <problem>\\nANSWER: <number>",
-    "test_examples": [
-        {{"problem_code": "expected = '42'", "correct_answer": "42", "incorrect_answer": "41", "test_code": "assert str(student_answer).strip() == str(expected).strip()"}},
-        {{"problem_code": "expected = '7'", "correct_answer": "7", "incorrect_answer": "8", "test_code": "assert str(student_answer).strip() == str(expected).strip()"}}
-    ]
-}}
-```
+FACTORY_PROMPT = """Write a Python verifier for a reasoning domain. Output ONLY valid JSON.
 
-Now create a verifier for this domain:
+The verifier function signature:
+  def verify(problem_data: dict, answer: str) -> bool
+  - problem_data ALWAYS has an "expected_answer" key
+  - answer is the model's answer (string)
+  - Return True if correct, False otherwise
+  - Use ONLY stdlib: math, re, json, itertools
 
+COMPLETE EXAMPLE (arithmetic domain):
+{"domain":"arithmetic","description":"Basic arithmetic","verifier_code":"def verify(problem_data, answer):\\n    exp = str(problem_data.get('expected_answer','')).strip()\\n    ans = str(answer).strip()\\n    try:\\n        return abs(float(ans) - float(exp)) < 0.01\\n    except:\\n        return ans.lower() == exp.lower()","proposer_template":"Generate an arithmetic problem.\\nPROBLEM: <problem statement>\\nANSWER: <numeric answer>","test_examples":[{"correct_answer":"42","incorrect_answer":"41"},{"correct_answer":"7","incorrect_answer":"8"},{"correct_answer":"100","incorrect_answer":"99"}]}
+
+Now write a verifier for:
 Domain: {domain}
 Description: {description}
 
-Rules:
-1. The verifier must use ONLY pure Python (math, re, itertools — no external packages)
-2. Keep the verifier SIMPLE — check one thing well, not many things poorly
-3. The test_code must use `student_answer` (the variable name) and `expected` from problem_code
-4. Make test_examples realistic — real problems with real correct and incorrect answers
+Requirements:
+- verifier_code must define: def verify(problem_data, answer) -> bool
+- test_examples must have "correct_answer" and "incorrect_answer" (at least 3 pairs)
+- proposer_template must show how to generate problems for this domain
 
-Output ONLY the JSON, no other text:
-```json
-{{
-    "domain": "{domain}",
-    "description": "{description}",
-    "verifier_code": "def verify(problem_data, answer):\\n    ...",
-    "proposer_template": "...",
-    "test_examples": [
-        {{"problem_code": "expected = 'X'", "correct_answer": "X", "incorrect_answer": "Y", "test_code": "assert str(student_answer).strip() == str(expected).strip()"}},
-        {{"problem_code": "expected = 'A'", "correct_answer": "A", "incorrect_answer": "B", "test_code": "assert str(student_answer).strip() == str(expected).strip()"}},
-        {{"problem_code": "expected = 'P'", "correct_answer": "P", "incorrect_answer": "Q", "test_code": "assert str(student_answer).strip() == str(expected).strip()"}}
-    ]
-}}
-```"""
+Output ONLY the JSON object, nothing else:"""
 
-FACTORY_RETRY_PROMPT = """Your verifier for domain "{domain}" failed validation.
+FACTORY_RETRY_PROMPT = """Your verifier for "{domain}" failed: {accuracy:.0%} accuracy on {total} checks.
 
-Here are the failing test cases:
+Failing tests (correct_answer that verify() MUST accept, incorrect_answer it MUST reject):
 {failing_cases}
 
-The verifier code was:
-```python
+Current verifier_code:
 {verifier_code}
-```
 
-Fix the verifier so ALL test cases pass. Common issues:
-- Type mismatch: compare str(answer) == str(expected), not answer == expected
-- Off-by-one in numeric comparisons
-- Missing edge cases
+The most common bugs:
+  - Forgot .strip() → "42 " != "42"
+  - Float compare with == → use abs(float(a)-float(b)) < 0.01
+  - Wrong key name → always use problem_data.get('expected_answer', '')
+  - Crashes on wrong input → add try/except, return False on error
 
-Output the corrected JSON (same format, fixed verifier_code):
-```json
-{{
-    "domain": "{domain}",
-    "description": "{description}",
-    "verifier_code": "def verify(problem_data, answer):\\n    ...",
-    "proposer_template": "...",
-    "test_examples": [...]
-}}
-```"""
+Rewrite the entire JSON with a fixed verifier_code:
+{"domain":"{domain}","description":"{description}","verifier_code":"def verify(problem_data, answer):\\n    ...","proposer_template":"...","test_examples":[...]}"""
 
-# Token budget for factory generation — needs more room than regular inference
-# (full JSON with verifier code + 5 test examples is 800-1200 tokens)
-FACTORY_MAX_TOKENS = 2500
+# Token budget — factory JSON needs ~800-1500 tokens of output
+FACTORY_MAX_TOKENS = 2000
 
 # Candidate domains for expansion
 EXPANSION_CANDIDATES = [
     {
+        "domain": "planning",
+        "description": "Sequential planning — ordering steps, choosing optimal sequences",
+    },
+    {
+        "domain": "causal_reasoning",
+        "description": "Causal reasoning — cause-and-effect chains, counterfactuals",
+    },
+    {
+        "domain": "analogy",
+        "description": "Analogical reasoning — A is to B as C is to D patterns",
+    },
+    {
         "domain": "logic",
-        "description": "Propositional and predicate logic, truth tables, logical deduction",
+        "description": "Propositional and predicate logic, truth tables, syllogisms",
     },
     {
         "domain": "spatial",
-        "description": "Spatial reasoning — positions, directions, relative locations",
+        "description": "Spatial reasoning — positions, directions, 2D grid navigation",
     },
     {
-        "domain": "planning",
-        "description": "Sequential planning — ordering steps, scheduling, resource allocation",
+        "domain": "probability",
+        "description": "Probability — compute likelihoods, expected values, combinatorics",
     },
     {
         "domain": "constraint",
         "description": "Constraint satisfaction — Sudoku-like puzzles, scheduling constraints",
     },
     {
-        "domain": "probability",
-        "description": "Probability and statistics — compute probabilities, expected values",
-    },
-    {
         "domain": "graph",
-        "description": "Graph theory — shortest paths, connectivity, coloring, matching",
-    },
-    {
-        "domain": "data_analysis",
-        "description": "Data analysis — given data, compute statistics, find patterns",
-    },
-    {
-        "domain": "physics",
-        "description": "Classical physics — kinematics, forces, energy, circuits",
+        "description": "Graph theory — shortest paths, connectivity, coloring",
     },
 ]
 
 
 class VerificationFactory:
-    """Creates and validates new domain verifiers."""
+    """Creates, validates, and registers new domain verifiers."""
 
     def __init__(self, generated_dir: str = "src/domains/generated"):
         self.generated_dir = Path(generated_dir)
         self.generated_dir.mkdir(parents=True, exist_ok=True)
         self.verifiers: dict[str, DomainVerifier] = {}
+        # Cache for compiled verify() functions — avoid re-exec on every call
+        self._fn_cache: dict[str, Callable] = {}
         self._load_existing()
 
     def _load_existing(self):
-        """Load previously generated verifiers."""
+        """Load previously generated (and validated) verifiers from disk."""
         for f in self.generated_dir.glob("*.json"):
             try:
                 data = json.loads(f.read_text())
-                verifier = DomainVerifier(**data)
+                verifier = DomainVerifier(**{
+                    k: v for k, v in data.items()
+                    if k in DomainVerifier.__dataclass_fields__
+                })
                 if verifier.validated:
                     self.verifiers[verifier.domain] = verifier
-            except (json.JSONDecodeError, TypeError):
-                continue
+                    print(f"  📂 Loaded registered verifier: {verifier.domain}")
+            except (json.JSONDecodeError, TypeError) as e:
+                print(f"  ⚠️  Failed to load {f.name}: {e}")
+
+    def get_verify_fn(self, domain: str) -> Optional[Callable]:
+        """Get (and cache) the compiled verify() function for a domain."""
+        if domain in self._fn_cache:
+            return self._fn_cache[domain]
+        
+        verifier = self.verifiers.get(domain)
+        if not verifier:
+            return None
+        
+        try:
+            namespace: dict = {}
+            exec(compile(verifier.verifier_code, f"<verifier:{domain}>", "exec"), namespace)
+            fn = namespace.get("verify")
+            if callable(fn):
+                self._fn_cache[domain] = fn
+                return fn
+        except Exception as e:
+            print(f"  ⚠️  Failed to compile verifier for {domain}: {e}")
+        return None
+
+    def call_verifier(self, domain: str, problem_data: dict, answer: str) -> bool:
+        """Call a registered verifier. Returns False on any error."""
+        fn = self.get_verify_fn(domain)
+        if fn is None:
+            return False
+        try:
+            return bool(fn(problem_data, str(answer)))
+        except Exception:
+            return False
 
     def get_next_candidate(self, existing_domains: list[str]) -> Optional[dict]:
-        """Get the next domain candidate for expansion."""
+        """Get the next domain candidate not yet in the curriculum."""
         for candidate in EXPANSION_CANDIDATES:
             if candidate["domain"] not in existing_domains:
                 return candidate
         return None
 
     def build_factory_prompt(self, domain: str, description: str) -> str:
-        """Build the prompt for the model to generate a verifier."""
         return FACTORY_PROMPT.format(domain=domain, description=description)
 
     def parse_verifier(self, raw_output: str) -> Optional[DomainVerifier]:
-        """Parse the model's output into a DomainVerifier.
+        """Parse model output into a DomainVerifier.
 
-        Robust parsing strategy:
-        1. Strip all thinking wrappers (<think> tags, "Thinking Process:" headers)
-           to work on the full flattened text
-        2. Try markdown code fences first (```json...```)
-        3. Try ALL JSON objects in the text (scan every '{', pick largest valid one)
-        4. Fall back to regex field extraction for truncated output
+        Strategy:
+        1. Strip <think> wrappers
+        2. Try ```json fences
+        3. Scan all '{' positions for largest valid JSON object
+        4. Regex field extraction as last resort
         """
         import re as _re
 
-        # --- Flatten text: remove all thinking wrappers ---
         text = raw_output.strip()
-        text = text.replace("<think>", "").replace("</think>", "")
-        # Strip "Thinking Process:" header lines — keep the content
+        # Strip thinking wrappers
+        text = _re.sub(r'<think>.*?</think>', '', text, flags=_re.DOTALL).strip()
         text = _re.sub(r'^Thinking Process:\s*\n', '', text, flags=_re.MULTILINE)
 
         def _try_parse(candidate: str) -> Optional[DomainVerifier]:
-            """Try to parse a JSON string into a DomainVerifier."""
             try:
                 data = json.loads(candidate)
                 if "verifier_code" not in data:
@@ -202,27 +214,23 @@ class VerificationFactory:
                     proposer_template=data.get("proposer_template", ""),
                     test_examples=data.get("test_examples", []),
                 )
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError, TypeError):
                 return None
 
-        # 1. Markdown code fences (highest confidence)
-        if "```json" in text:
-            candidate = text.split("```json")[1].split("```")[0].strip()
-            result = _try_parse(candidate)
-            if result:
-                return result
-        if "```" in text:
-            for block in text.split("```")[1::2]:  # odd-indexed = code blocks
-                result = _try_parse(block.strip())
-                if result:
-                    return result
+        # 1. Markdown code fences
+        for marker in ["```json", "```"]:
+            if marker in text:
+                parts = text.split(marker)
+                for i in range(1, len(parts), 2):
+                    result = _try_parse(parts[i].strip())
+                    if result:
+                        return result
 
-        # 2. Scan ALL '{' positions — try each as root JSON, keep largest valid
+        # 2. Scan all '{' positions — keep largest valid parse
         best: Optional[DomainVerifier] = None
         best_len = 0
         for m in _re.finditer(r'\{', text):
             candidate = text[m.start():]
-            # Walk forward to find the matching closing brace
             depth = 0
             end = -1
             in_string = False
@@ -256,7 +264,7 @@ class VerificationFactory:
         if best:
             return best
 
-        # 3. Truncated JSON recovery — regex field extraction
+        # 3. Regex field extraction for truncated output
         print("  ⚠️  JSON parse failed, attempting field extraction...")
         try:
             domain_m = _re.search(r'"domain"\s*:\s*"([^"]+)"', text)
@@ -265,16 +273,17 @@ class VerificationFactory:
             tmpl_m = _re.search(r'"proposer_template"\s*:\s*"((?:[^"\\]|\\.)*)"', text, _re.DOTALL)
 
             if not (domain_m and code_m):
-                print("  ❌ Could not extract required fields from output")
+                print("  ❌ Could not extract required fields")
                 return None
 
             verifier_code = code_m.group(1).replace("\\n", "\n").replace('\\"', '"')
-            proposer_template = tmpl_m.group(1).replace("\\n", "\n").replace('\\"', '"') if tmpl_m else ""
-
-            print(f"  ✅ Extracted verifier for '{domain_m.group(1)}' via regex (no test examples)")
+            proposer_template = (
+                tmpl_m.group(1).replace("\\n", "\n").replace('\\"', '"') if tmpl_m else ""
+            )
+            print(f"  ✅ Extracted verifier for '{domain_m.group(1)}' via regex")
             return DomainVerifier(
                 domain=domain_m.group(1),
-                description=desc_m.group(1) if desc_m else domain_m.group(1),
+                description=desc_m.group(1) if desc_m else "",
                 verifier_code=verifier_code,
                 proposer_template=proposer_template,
                 test_examples=[],
@@ -283,92 +292,141 @@ class VerificationFactory:
             print(f"  ❌ Field extraction failed: {e}")
             return None
 
-    def validate_verifier(
-        self, verifier: DomainVerifier, sandbox_config: SandboxConfig = SandboxConfig()
-    ) -> bool:
-        """Validate a generated verifier against its test examples.
-        
-        A verifier is valid if:
-        1. It correctly accepts all correct answers
-        2. It correctly rejects all incorrect answers
-        3. It doesn't crash or timeout
+    def validate_verifier(self, verifier: DomainVerifier) -> bool:
+        """Validate a generated verifier by directly executing it.
+
+        For each test example, we check:
+          - verify({"expected_answer": correct_answer}, correct_answer) → True
+          - verify({"expected_answer": correct_answer}, incorrect_answer) → False
+
+        Threshold: 60% of checks must pass.
         """
         if not verifier.test_examples:
+            print("  ❌ No test examples — cannot validate")
+            verifier.validated = False
+            return False
+
+        # Compile the verifier function
+        try:
+            namespace: dict = {}
+            exec(compile(verifier.verifier_code, f"<verifier:{verifier.domain}>", "exec"), namespace)
+            verify_fn = namespace.get("verify")
+            if not callable(verify_fn):
+                print("  ❌ No callable 'verify' function in generated code")
+                verifier.validated = False
+                return False
+        except Exception as e:
+            print(f"  ❌ Verifier compile/exec error: {e}")
+            verifier.validated = False
             return False
 
         correct_count = 0
-        total = len(verifier.test_examples) * 2  # Each example tests correct + incorrect
+        total = len(verifier.test_examples) * 2
+        results_detail = []
 
-        for example in verifier.test_examples:
-            # Test with correct answer
-            result_correct = verify_code_task(
-                problem_code=example.get("problem_code", ""),
-                solution=f'student_answer = {json.dumps(example["correct_answer"])}',
-                test_code=example.get("test_code", "assert False"),
-                config=sandbox_config,
-            )
-            if result_correct.correct:
+        for ex in verifier.test_examples:
+            correct_ans = ex.get("correct_answer", "")
+            wrong_ans = ex.get("incorrect_answer", "")
+            problem_data = {"expected_answer": correct_ans}
+
+            # Check 1: correct answer should be accepted
+            accepted = False
+            try:
+                accepted = bool(verify_fn(problem_data, str(correct_ans)))
+                if accepted:
+                    correct_count += 1
+            except Exception:
+                pass
+
+            # Check 2: wrong answer should be rejected
+            rejected = False
+            try:
+                result = verify_fn(problem_data, str(wrong_ans))
+                rejected = not bool(result)
+                if rejected:
+                    correct_count += 1
+            except Exception:
+                # Exception on wrong answer = implicit rejection
+                rejected = True
                 correct_count += 1
 
-            # Test with incorrect answer
-            result_incorrect = verify_code_task(
-                problem_code=example.get("problem_code", ""),
-                solution=f'student_answer = {json.dumps(example["incorrect_answer"])}',
-                test_code=example.get("test_code", "assert False"),
-                config=sandbox_config,
-            )
-            if not result_incorrect.correct:  # Should FAIL for wrong answer
-                correct_count += 1
+            results_detail.append({
+                "correct_answer": correct_ans,
+                "incorrect_answer": wrong_ans,
+                "accepted": accepted,
+                "rejected": rejected,
+            })
 
         accuracy = correct_count / max(total, 1)
         verifier.accuracy_on_tests = accuracy
-        verifier.validated = accuracy >= 0.6  # 60% threshold — stricter gate added via retry loop
+        verifier.validated = accuracy >= 0.6
+
+        status = "✅" if verifier.validated else "❌"
+        print(f"  {status} Validation: {accuracy:.0%} ({correct_count}/{total} checks passed)")
+        for r in results_detail:
+            accept_icon = "✓" if r["accepted"] else "✗"
+            reject_icon = "✓" if r["rejected"] else "✗"
+            print(
+                f"     correct='{r['correct_answer']}' [{accept_icon}]  "
+                f"wrong='{r['incorrect_answer']}' [{reject_icon}]"
+            )
 
         return verifier.validated
 
+    def get_failing_cases(self, verifier: DomainVerifier) -> list[dict]:
+        """Return cases where the verifier gave wrong results."""
+        try:
+            namespace: dict = {}
+            exec(compile(verifier.verifier_code, "<verifier>", "exec"), namespace)
+            verify_fn = namespace.get("verify")
+        except Exception:
+            return verifier.test_examples
+
+        failing = []
+        for ex in verifier.test_examples:
+            correct_ans = ex.get("correct_answer", "")
+            wrong_ans = ex.get("incorrect_answer", "")
+            problem_data = {"expected_answer": correct_ans}
+
+            try:
+                accepted = bool(verify_fn(problem_data, str(correct_ans)))
+            except Exception:
+                accepted = False
+
+            try:
+                rejected = not bool(verify_fn(problem_data, str(wrong_ans)))
+            except Exception:
+                rejected = True
+
+            if not accepted or not rejected:
+                failing.append({
+                    **ex,
+                    "correct_passed": accepted,
+                    "incorrect_rejected": rejected,
+                })
+        return failing
+
     def build_retry_prompt(self, verifier: DomainVerifier, failing_cases: list[dict]) -> str:
-        """Build a retry prompt showing the model which test cases failed."""
         cases_text = "\n".join(
-            f"  - problem_code: {c.get('problem_code','')!r}\n"
-            f"    correct_answer: {c.get('correct_answer','')!r}\n"
-            f"    incorrect_answer: {c.get('incorrect_answer','')!r}\n"
-            f"    test_code: {c.get('test_code','')!r}\n"
-            f"    result: correct={c.get('correct_passed', False)}, incorrect={c.get('incorrect_rejected', False)}"
+            f"  correct='{c.get('correct_answer','')}'  wrong='{c.get('incorrect_answer','')}'"
+            f"  → accepted={c.get('correct_passed',False)}, rejected={c.get('incorrect_rejected',False)}"
             for c in failing_cases
         )
+        total = len(verifier.test_examples) * 2
         return FACTORY_RETRY_PROMPT.format(
             domain=verifier.domain,
             description=verifier.description,
+            accuracy=verifier.accuracy_on_tests,
+            total=total,
             failing_cases=cases_text,
             verifier_code=verifier.verifier_code,
         )
 
-    def get_failing_cases(self, verifier: DomainVerifier, sandbox_config: SandboxConfig) -> list[dict]:
-        """Return test cases that failed validation with pass/fail details."""
-        failing = []
-        for example in verifier.test_examples:
-            r_correct = verify_code_task(
-                problem_code=example.get("problem_code", ""),
-                solution=f'student_answer = {json.dumps(example["correct_answer"])}',
-                test_code=example.get("test_code", "assert False"),
-                config=sandbox_config,
-            )
-            r_incorrect = verify_code_task(
-                problem_code=example.get("problem_code", ""),
-                solution=f'student_answer = {json.dumps(example["incorrect_answer"])}',
-                test_code=example.get("test_code", "assert False"),
-                config=sandbox_config,
-            )
-            if not r_correct.correct or r_incorrect.correct:
-                failing.append({**example, "correct_passed": r_correct.correct, "incorrect_rejected": not r_incorrect.correct})
-        return failing
-
     def register_verifier(self, verifier: DomainVerifier):
-        """Save and register a validated verifier."""
+        """Save a validated verifier to disk and register it in the curriculum."""
         if not verifier.validated:
             raise ValueError("Cannot register an unvalidated verifier")
 
-        # Save to disk
         path = self.generated_dir / f"{verifier.domain}.json"
         path.write_text(json.dumps({
             "domain": verifier.domain,
@@ -380,10 +438,66 @@ class VerificationFactory:
             "accuracy_on_tests": verifier.accuracy_on_tests,
         }, indent=2))
 
-        # Register in the proposer system
         register_domain(verifier.domain, verifier.proposer_template)
         self.verifiers[verifier.domain] = verifier
+        # Invalidate cache so next call recompiles fresh
+        self._fn_cache.pop(verifier.domain, None)
+        print(f"  💾 Registered verifier: {verifier.domain} (saved to {path})")
 
     def get_registered_domains(self) -> list[str]:
-        """Get all registered (validated) domain names."""
         return list(self.verifiers.keys())
+
+    def run_factory_with_model(
+        self,
+        domain: str,
+        description: str,
+        generate_fn,          # Callable[[str], str]  — takes prompt, returns raw text
+        max_retries: int = 2,
+    ) -> Optional[DomainVerifier]:
+        """End-to-end: prompt → parse → validate → (retry) → return verifier or None.
+
+        generate_fn should accept a prompt string and return the model's raw output.
+        """
+        print(f"\n{'─'*50}")
+        print(f"🏭 Factory: generating verifier for '{domain}'")
+        print(f"   {description}")
+
+        prompt = self.build_factory_prompt(domain, description)
+        print(f"   Prompt: {len(prompt)} chars | max_retries={max_retries}")
+
+        verifier = None
+        for attempt in range(max_retries + 1):
+            if attempt == 0:
+                current_prompt = prompt
+                print(f"\n   ⟳ Attempt 1: generating...")
+            else:
+                if verifier is None:
+                    print(f"   ⟳ Attempt {attempt+1}: previous parse failed, retrying from scratch")
+                    current_prompt = prompt
+                else:
+                    failing = self.get_failing_cases(verifier)
+                    current_prompt = self.build_retry_prompt(verifier, failing)
+                    print(f"   ⟳ Attempt {attempt+1}: retry with {len(failing)} failing cases")
+
+            t0 = time.monotonic()
+            raw_output = generate_fn(current_prompt)
+            elapsed = time.monotonic() - t0
+            print(f"   Generated {len(raw_output)} chars in {elapsed:.1f}s")
+
+            verifier = self.parse_verifier(raw_output)
+            if verifier is None:
+                print("   ❌ Parse failed")
+                continue
+
+            verifier.domain = domain  # Ensure domain matches what was requested
+            verifier.description = description
+            print(f"   Parsed: {len(verifier.test_examples)} test examples")
+
+            if self.validate_verifier(verifier):
+                print(f"   🎉 Verifier validated! accuracy={verifier.accuracy_on_tests:.0%}")
+                return verifier
+            else:
+                print(f"   ↩️  Validation failed ({verifier.accuracy_on_tests:.0%}) — retrying")
+
+        print(f"   ❌ All {max_retries+1} attempts failed for '{domain}'")
+        return None

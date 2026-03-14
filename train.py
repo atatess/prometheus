@@ -57,6 +57,7 @@ from src.solver import build_solver_prompt, parse_solution
 from src.verifier import verify_code_task, verify_math, SandboxConfig
 from src.curriculum import Curriculum, CurriculumConfig
 from src.seed_problems import SEED_PROBLEMS
+from src.verification_factory import VerificationFactory, EXPANSION_CANDIDATES
 
 
 def load_config(config_path: str) -> dict:
@@ -106,6 +107,15 @@ def run_experiment(config: dict, experiment_dir: Path):
     curriculum_path = experiment_dir / "curriculum_state.json"
     if curriculum_path.exists():
         curriculum.load(str(curriculum_path))
+
+    # --- Setup Verification Factory (Layer 2) ---
+    factory = VerificationFactory(generated_dir="src/domains/generated")
+    # Wire any already-registered factory domains into the curriculum
+    for factory_domain in factory.get_registered_domains():
+        if factory_domain not in curriculum.domains:
+            curriculum.add_domain(factory_domain)
+            print(f"  🏭 Loaded factory domain: {factory_domain}")
+    print(f"✅ Verification Factory ready ({len(factory.get_registered_domains())} registered domains)")
     
     # --- Setup Sandbox ---
     sandbox_config = SandboxConfig(
@@ -145,8 +155,55 @@ def run_experiment(config: dict, experiment_dir: Path):
         # 1. Select domain and difficulty
         domain = curriculum.select_domain()
         if domain == "__needs_expansion__":
-            print("⚡ All domains saturated — needs expansion!")
-            break
+            print("⚡ All domains saturated — triggering Layer 2 expansion!")
+            # Try to add a new domain via the Verification Factory
+            candidate = factory.get_next_candidate(curriculum.domains)
+            if candidate is None:
+                print("⚡ No more expansion candidates — training complete.")
+                break
+
+            print(f"🏭 Layer 2: generating verifier for '{candidate['domain']}'...")
+
+            # Build a generate_fn that wraps the current model
+            def _make_generate_fn(mdl, tok):
+                def _generate(prompt_text: str) -> str:
+                    from src.verification_factory import FACTORY_MAX_TOKENS
+                    messages = [{"role": "user", "content": prompt_text}]
+                    if _USE_CUDA:
+                        import torch
+                        formatted = tok.apply_chat_template(
+                            messages, tokenize=False, add_generation_prompt=True
+                        )
+                        inputs = tok(formatted, return_tensors="pt").to("cuda")
+                        with torch.no_grad():
+                            out = mdl.generate(
+                                **inputs,
+                                max_new_tokens=FACTORY_MAX_TOKENS,
+                                do_sample=True,
+                                temperature=0.6,
+                                top_p=0.95,
+                                pad_token_id=tok.eos_token_id,
+                            )
+                        generated = out[0][inputs["input_ids"].shape[1]:]
+                        return tok.decode(generated, skip_special_tokens=True)
+                    else:
+                        return chat_generate(mdl, tok, prompt_text, max_tokens=FACTORY_MAX_TOKENS)
+                return _generate
+
+            generate_fn = _make_generate_fn(model, tokenizer)
+            new_verifier = factory.run_factory_with_model(
+                candidate["domain"], candidate["description"],
+                generate_fn=generate_fn,
+                max_retries=2,
+            )
+            if new_verifier is not None:
+                factory.register_verifier(new_verifier)
+                curriculum.add_domain(new_verifier.domain)
+                print(f"✅ Layer 2 success! Added domain: {new_verifier.domain}")
+            else:
+                print(f"❌ Layer 2 failed for '{candidate['domain']}' — will try next step")
+            # Continue training (don't break)
+            continue
         
         difficulty = curriculum.select_difficulty(domain)
         print(f"  Domain: {domain} | Difficulty: {difficulty}")
@@ -227,10 +284,16 @@ def run_experiment(config: dict, experiment_dir: Path):
         
         rewards = []
         for sol in solutions:
-            if "expected_answer" in problem.metadata:
+            # Priority 1: factory-registered verifier for this domain
+            if actual_domain in factory.verifiers:
+                correct = factory.call_verifier(actual_domain, problem.metadata, sol.answer)
+            # Priority 2: math/string expected_answer
+            elif "expected_answer" in problem.metadata:
                 result = verify_math(
                     problem.prompt, sol.answer, problem.metadata["expected_answer"]
                 )
+                correct = result.correct
+            # Priority 3: code sandbox (problem_code + test_code)
             else:
                 result = verify_code_task(
                     problem.problem_code,
@@ -238,11 +301,12 @@ def run_experiment(config: dict, experiment_dir: Path):
                     problem.test_code,
                     sandbox_config,
                 )
-            
-            reward = 1.0 if result.correct else 0.0
+                correct = result.correct
+
+            reward = 1.0 if correct else 0.0
             rewards.append(reward)
             total_attempts += 1
-            if result.correct:
+            if correct:
                 total_correct += 1
         
         curriculum.record_attempt(actual_domain, any(r > 0 for r in rewards))
