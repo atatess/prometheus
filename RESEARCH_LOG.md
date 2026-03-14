@@ -217,3 +217,24 @@ Two separate issues:
 ---
 
 *Log maintained by Clawd 🦞 — updated after every run*
+
+## Run 012 → 013 (2026-03-14 23:54) — Proposer fix
+
+### Root cause of proposer failure (run_011 steps 92+):
+- Qwen3.5-4B thinking model generates PROBLEM/ANSWER **inside** `<think>` block
+- `chat_generate()` strips thinking → returns only post-think text (often 1 line)
+- If post-think text has no PROBLEM:/ANSWER: → `parse_proposed_problem` → None
+- With max_tokens=1500, thinking eats the budget before ANSWER: gets written
+
+### Fix: Template-based proposer (`src/template_proposer.py`)
+- 304-line Python template generator — no LLM, no parsing, guaranteed valid
+- 17 math templates (linear, quadratic, combinatorics, modular, GCD, primes, etc.)
+- 5 code templates (fibonacci, sum_range, count_evens, factorial, list_ops)
+- 4 logic templates (workers/days, age, coins, rate)
+- Wire: LLM proposer first → parse fail → `template_generate_problem()` (never fails)
+
+### Run 013 — current overnight run
+- PID 29090, meta-loop PID 29091
+- Loss at step 1: 1.41 (slightly higher than 012, model re-loaded fresh)
+- All fixes active: template proposer, seed fallback, normalized log_probs, full responses
+
