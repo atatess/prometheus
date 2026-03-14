@@ -11,13 +11,13 @@ from typing import Optional
 from .proposer import Problem
 
 
-SOLVER_PROMPT = """Solve this problem. Give your final answer as a single number.
+SOLVER_PROMPT = """Solve this problem. Think carefully, then give your answer.
 
 {problem_prompt}
 
 {format_hint}
 
-Put your final answer after "ANSWER: " on its own line.
+FINAL_ANSWER: [write only the answer here, nothing else]
 """
 
 CODE_SOLVER_PROMPT = """You are solving a coding problem. Write a Python function that solves it.
@@ -59,13 +59,26 @@ def parse_solution(raw_response: str, domain: str) -> Solution:
     import re
     text = raw_response.strip()
 
-    # Pattern 0: Search for ANSWER: anywhere in the raw text FIRST.
-    # This is the most reliable signal — works regardless of thinking format.
-    # Search in full raw response including inside <think> blocks.
-    answer_match = re.search(r'ANSWER:\s*(.+?)(?:\n|$)', text)
-    if answer_match:
-        answer = answer_match.group(1).strip()
-        return Solution(raw_response=raw_response, answer=answer)
+    # Pattern 0: Search for ANSWER: in the raw text.
+    # Take the LAST match — the model often echoes "ANSWER: " from the prompt
+    # instructions inside its thinking ("Put your answer after ANSWER: on its own line"),
+    # so the first hit is the instruction echo, the last hit is the actual answer.
+    # Also exclude lines where ANSWER: is preceded by other words (instruction context).
+    # Pattern 0a: FINAL_ANSWER: marker (our primary, distinctive format)
+    fa_matches = re.findall(r'FINAL_ANSWER:\s*\[?([^\]\n\[]+?)\]?(?:\n|$)', text)
+    if fa_matches:
+        for candidate in reversed(fa_matches):
+            candidate = candidate.strip()
+            if candidate and 'write only' not in candidate and candidate != '...':
+                return Solution(raw_response=raw_response, answer=candidate)
+
+    # Pattern 0b: ANSWER: marker (legacy, take last non-instruction match)
+    answer_matches = re.findall(r'(?:^|\n)ANSWER:\s*([^\n"(]+?)(?:\n|$)', text)
+    if answer_matches:
+        for candidate in reversed(answer_matches):
+            candidate = candidate.strip()
+            if candidate and candidate not in ('...', '[number]', 'X', 'the answer', 'your answer'):
+                return Solution(raw_response=raw_response, answer=candidate)
 
     # Strip thinking blocks to get the final response
     if "<think>" in text and "</think>" in text:
