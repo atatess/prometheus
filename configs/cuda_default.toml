@@ -1,0 +1,39 @@
+# Prometheus — CUDA / PyTorch default config
+# Use with: PROMETHEUS_BACKEND=cuda python train.py --config configs/cuda_default.toml
+
+[model]
+name = "/root/models/qwen3.5-4b"   # Local path to base model weights
+# No `quantize` field — PEFT LoRA is applied on top of bfloat16 weights
+lora_rank = 8
+lora_alpha = 16
+lora_targets = ["q_proj", "v_proj", "k_proj", "o_proj",
+                 "gate_proj", "up_proj", "down_proj"]
+
+[training]
+method = "grpo"
+group_size = 6                  # Rollouts per prompt (more diversity on GPU)
+learning_rate = 5e-6
+weight_decay = 0.01
+max_new_tokens = 1024           # Budget for thinking + answer
+time_budget_minutes = 10        # Per experiment
+warmup_steps = 10
+grad_accumulation_steps = 2     # Lower than MLX — GPU can handle larger effective batch
+max_seq_len = 2048
+
+[curriculum]
+initial_domains = ["math", "code"]
+enable_verification_factory = true
+frontier_band = [0.3, 0.8]
+problems_per_round = 32
+max_domain_saturation = 0.85
+
+[meta]
+enable_domain_expansion = true
+enable_autoresearch = false
+benchmark_interval = 10
+checkpoint_interval = 5
+max_experiments = -1
+
+[sandbox]
+timeout_seconds = 30
+max_memory_mb = 512
