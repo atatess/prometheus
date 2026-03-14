@@ -127,26 +127,33 @@ def build_proposer_prompt(domain: str, difficulty: str = "medium") -> str:
 
 def parse_proposed_problem(domain: str, raw_output: str) -> Optional[Problem]:
     """Parse the model's raw output into a Problem object.
-    
-    Supports two formats:
-    1. PROBLEM: ... / ANSWER: ... (new plain-text format)
-    2. JSON {"prompt": ..., "expected_answer": ...} (legacy)
+
+    Search strategy: scan the FULL raw output (including thinking blocks) for
+    PROBLEM/ANSWER patterns and JSON. The model often puts the answer inside
+    the <think> block or Thinking Process section — we want all of it.
+
+    Supports:
+    1. PROBLEM: ... / ANSWER: ... (plain-text format — most domains)
+    2. JSON {"prompt": ..., "expected_answer": ...} (code domain)
+    3. Raw continuation: model directly outputs problem text + ANSWER:
     """
     import re
-    
-    # Strip thinking tags first
+
+    # Work on the full text — don't strip thinking, the answer lives inside it
     text = raw_output.strip()
-    if "<think>" in text and "</think>" in text:
-        text = text.split("</think>")[-1].strip()
-    
-    # --- Try plain-text PROBLEM/ANSWER format first ---
-    prob_match = re.search(r'PROBLEM:\s*(.+?)(?=\nANSWER:|\Z)', text, re.DOTALL | re.IGNORECASE)
-    ans_match = re.search(r'ANSWER:\s*(.+?)(?=\n[A-Z]|\Z)', text, re.DOTALL | re.IGNORECASE)
-    
+    # Remove <think> tags but keep the content inside
+    text = text.replace("<think>", "").replace("</think>", "")
+    # Remove "Thinking Process:" header but keep content
+    text = re.sub(r'^Thinking Process:\s*\n?', '', text, flags=re.MULTILINE)
+
+    # --- 1. PROBLEM: ... / ANSWER: ... format ---
+    # Search the whole text — the model may write it in the thinking section
+    prob_match = re.search(r'PROBLEM:\s*(.+?)(?=\nANSWER:)', text, re.DOTALL | re.IGNORECASE)
+    ans_match  = re.search(r'ANSWER:\s*(.+?)(?=\n(?:PROBLEM:|NOTE:|$)|\Z)', text, re.DOTALL | re.IGNORECASE)
+
     if prob_match and ans_match:
-        prompt = prob_match.group(1).strip()
-        expected = ans_match.group(1).strip().split('\n')[0].strip()  # first line only
-        
+        prompt   = prob_match.group(1).strip()
+        expected = ans_match.group(1).strip().split('\n')[0].strip()
         if _is_valid_problem(prompt, expected):
             return Problem(
                 domain=domain,
@@ -156,33 +163,66 @@ def parse_proposed_problem(domain: str, raw_output: str) -> Optional[Problem]:
                 test_code="assert str(student_answer).strip() == str(expected).strip()",
                 metadata={"expected_answer": expected},
             )
-    
-    # --- Fallback: try JSON format ---
-    try:
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0]
-        elif "```" in text:
-            text = text.split("```")[1].split("```")[0]
-        
-        # Find JSON object
-        json_match = re.search(r'\{[^{}]+\}', text, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group())
-            if isinstance(data, dict):
-                prompt = data.get("prompt", "")
-                expected = str(data.get("expected_answer", ""))
-                if _is_valid_problem(prompt, expected):
-                    return Problem(
-                        domain=domain,
-                        difficulty=data.get("difficulty", "medium"),
-                        prompt=prompt,
-                        problem_code=data.get("problem_code", f"expected = {repr(expected)}"),
-                        test_code=data.get("test_code", "assert str(student_answer).strip() == str(expected).strip()"),
-                        metadata=data,
-                    )
-    except (json.JSONDecodeError, KeyError):
-        pass
-    
+
+    # The math/logic prompts end with "PROBLEM:" so the model just continues
+    # without repeating the keyword — match "text\nANSWER: N" directly
+    direct_match = re.search(r'^(.+?)\nANSWER:\s*(.+?)(?:\n|\Z)', text, re.DOTALL | re.IGNORECASE)
+    if direct_match:
+        prompt   = direct_match.group(1).strip()
+        expected = direct_match.group(2).strip().split('\n')[0].strip()
+        if _is_valid_problem(prompt, expected):
+            return Problem(
+                domain=domain,
+                difficulty="medium",
+                prompt=prompt,
+                problem_code=f"expected = {repr(expected)}",
+                test_code="assert str(student_answer).strip() == str(expected).strip()",
+                metadata={"expected_answer": expected},
+            )
+
+    # --- 2. JSON format (code domain + others) ---
+    # Use a proper brace-balanced scanner — handles nested JSON
+    def _find_json(src: str):
+        for m in re.finditer(r'\{', src):
+            depth, end, in_str, esc = 0, -1, False, False
+            for i, ch in enumerate(src[m.start():]):
+                if esc:             esc = False; continue
+                if ch == '\\' and in_str: esc = True; continue
+                if ch == '"':       in_str = not in_str; continue
+                if in_str:          continue
+                if ch == '{':       depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:  end = m.start() + i + 1; break
+            if end == -1: continue
+            try:
+                data = json.loads(src[m.start():end])
+                if isinstance(data, dict) and "prompt" in data:
+                    return data
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    # Try markdown fences first, then full text
+    for block in [text]:
+        if "```json" in block:
+            block = block.split("```json")[1].split("```")[0]
+        elif "```" in block:
+            block = block.split("```")[1].split("```")[0]
+        data = _find_json(block)
+        if data:
+            prompt   = data.get("prompt", "")
+            expected = str(data.get("expected_answer", ""))
+            if _is_valid_problem(prompt, expected):
+                return Problem(
+                    domain=domain,
+                    difficulty=data.get("difficulty", "medium"),
+                    prompt=prompt,
+                    problem_code=data.get("problem_code", f"expected = {repr(expected)}"),
+                    test_code=data.get("test_code", "assert str(student_answer).strip() == str(expected).strip()"),
+                    metadata=data,
+                )
+
     return None
 
 
