@@ -157,7 +157,19 @@ def run_experiment(config: dict, experiment_dir: Path):
             print(f"  🌱 Seed problem [{problem.domain}]")
         else:
             proposer_prompt = build_proposer_prompt(domain, difficulty)
-            raw_problem = chat_generate(model, tokenizer, proposer_prompt, max_tokens=2000)
+            # IMPORTANT: Disable LoRA adapters for problem generation.
+            # GRPO training shifts the solver model toward FINAL_ANSWER: format,
+            # which breaks JSON/PROBLEM:/ANSWER: proposer output format.
+            # Using the base model (adapter-off) keeps proposer stable.
+            if _USE_CUDA:
+                from peft import PeftModel
+                if hasattr(model, 'disable_adapter'):
+                    with model.disable_adapter():
+                        raw_problem = chat_generate(model, tokenizer, proposer_prompt, max_tokens=2000)
+                else:
+                    raw_problem = chat_generate(model, tokenizer, proposer_prompt, max_tokens=2000)
+            else:
+                raw_problem = chat_generate(model, tokenizer, proposer_prompt, max_tokens=2000)
             problem = parse_proposed_problem(domain, raw_problem)
             
             if problem is None:
