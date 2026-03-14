@@ -5,7 +5,7 @@ Drop-in replacement for model_utils.py.
 Same public API: chat_generate(), strip_thinking()
 """
 
-import re
+import re  # noqa: E402 — must be at top level for strip_thinking
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
@@ -26,7 +26,6 @@ def strip_thinking(text: str) -> str:
     # Format 2: "Thinking Process:\n..." — Qwen3.5 base-style thinking
     # Find the actual answer after the thinking block
     if text.strip().startswith("Thinking Process:") or "Thinking Process:" in text[:50]:
-        import re
         # Look for "Answer:" or a final standalone number/word after the thinking
         answer_match = re.search(r'(?:^|\n)(?:Answer|Result|Therefore|So)[:\s]+(.+?)(?:\n|$)', text, re.IGNORECASE)
         if answer_match:
