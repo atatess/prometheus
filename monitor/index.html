@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<title>🔥 Prometheus Monitor</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  body { background: #0a0a0f; color: #e2e8f0; font-family: 'Inter', system-ui, sans-serif; }
+  .card { background: #12121a; border: 1px solid #1e1e2e; border-radius: 12px; }
+  .glow-orange { box-shadow: 0 0 20px rgba(251,146,60,0.15); }
+  .glow-green  { box-shadow: 0 0 20px rgba(74,222,128,0.15); }
+  .glow-red    { box-shadow: 0 0 20px rgba(248,113,113,0.15); }
+  .pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; border-radius: 999px; font-size: 0.72rem; font-weight: 600; }
+  .pill-green  { background: rgba(74,222,128,0.15); color: #4ade80; border: 1px solid rgba(74,222,128,0.3); }
+  .pill-orange { background: rgba(251,146,60,0.15);  color: #fb923c; border: 1px solid rgba(251,146,60,0.3); }
+  .pill-red    { background: rgba(248,113,113,0.15); color: #f87171; border: 1px solid rgba(248,113,113,0.3); }
+  .pill-gray   { background: rgba(148,163,184,0.1);  color: #94a3b8; border: 1px solid rgba(148,163,184,0.2); }
+  .stat-val    { font-size: 2rem; font-weight: 700; line-height: 1; letter-spacing: -0.03em; }
+  .stat-lbl    { font-size: 0.7rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; }
+  .bar-track   { background: #1e1e2e; border-radius: 999px; overflow: hidden; height: 6px; }
+  .bar-fill    { height: 100%; border-radius: 999px; transition: width 0.8s ease; }
+  .log-line    { font-size: 0.7rem; font-family: 'JetBrains Mono', 'Fira Code', monospace; padding: 1px 0; color: #64748b; border-bottom: 1px solid #0f0f17; }
+  .log-line.step    { color: #60a5fa; }
+  .log-line.loss    { color: #fb923c; }
+  .log-line.acc     { color: #4ade80; }
+  .log-line.skip    { color: #a78bfa; }
+  .log-line.crash   { color: #f87171; }
+  .log-line.seed    { color: #94a3b8; }
+  .pulse { animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  ::-webkit-scrollbar { width: 4px; } 
+  ::-webkit-scrollbar-track { background: #0a0a0f; }
+  ::-webkit-scrollbar-thumb { background: #1e1e2e; border-radius: 4px; }
+</style>
+</head>
+<body class="min-h-screen p-3 md:p-6">
+
+<!-- Header -->
+<div class="flex items-center justify-between mb-5">
+  <div class="flex items-center gap-3">
+    <span class="text-2xl">🔥</span>
+    <div>
+      <h1 class="font-bold text-base leading-tight">Prometheus</h1>
+      <p class="text-xs text-slate-500">Self-evolving LLM training</p>
+    </div>
+  </div>
+  <div class="flex items-center gap-2">
+    <div id="status-pill" class="pill pill-gray">
+      <span class="w-1.5 h-1.5 rounded-full bg-slate-400 pulse"></span>
+      Connecting…
+    </div>
+    <div id="refresh-counter" class="text-xs text-slate-600 hidden">5s</div>
+  </div>
+</div>
+
+<!-- GPU + Process Row -->
+<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+  <div class="card p-4">
+    <div class="stat-val text-orange-400" id="gpu-util">—</div>
+    <div class="stat-lbl">GPU util</div>
+    <div class="bar-track mt-2"><div class="bar-fill bg-orange-400" id="gpu-bar" style="width:0%"></div></div>
+  </div>
+  <div class="card p-4">
+    <div class="stat-val text-purple-400" id="vram-used">—</div>
+    <div class="stat-lbl">VRAM used</div>
+    <div class="bar-track mt-2"><div class="bar-fill bg-purple-400" id="vram-bar" style="width:0%"></div></div>
+  </div>
+  <div class="card p-4">
+    <div class="stat-val text-blue-400" id="gpu-temp">—</div>
+    <div class="stat-lbl">GPU temp</div>
+  </div>
+  <div class="card p-4">
+    <div class="stat-val" id="step-count">—</div>
+    <div class="stat-lbl">Current step</div>
+  </div>
+</div>
+
+<!-- Main metrics -->
+<div class="grid grid-cols-3 gap-3 mb-3">
+  <div class="card p-4">
+    <div class="stat-val text-orange-300" id="latest-loss">—</div>
+    <div class="stat-lbl">Latest loss</div>
+  </div>
+  <div class="card p-4">
+    <div class="stat-val text-green-400" id="latest-acc">—</div>
+    <div class="stat-lbl">Accuracy</div>
+  </div>
+  <div class="card p-4">
+    <div class="stat-val text-slate-300" id="time-remaining">—</div>
+    <div class="stat-lbl">Remaining</div>
+  </div>
+</div>
+
+<!-- Current problem -->
+<div class="card p-4 mb-3 hidden" id="problem-card">
+  <div class="flex items-center gap-2 mb-1">
+    <span class="text-xs text-slate-500 uppercase tracking-wider">Current problem</span>
+    <span class="pill pill-gray text-xs" id="current-domain">math</span>
+  </div>
+  <p class="text-sm text-slate-300 leading-relaxed" id="current-problem">—</p>
+</div>
+
+<!-- Charts -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+  <div class="card p-4">
+    <div class="text-xs text-slate-500 uppercase tracking-wider mb-3">Loss over steps</div>
+    <div style="height:160px"><canvas id="loss-chart"></canvas></div>
+  </div>
+  <div class="card p-4">
+    <div class="text-xs text-slate-500 uppercase tracking-wider mb-3">Rollout accuracy %</div>
+    <div style="height:160px"><canvas id="acc-chart"></canvas></div>
+  </div>
+</div>
+
+<!-- Experiment history -->
+<div class="card p-4 mb-3">
+  <div class="text-xs text-slate-500 uppercase tracking-wider mb-3">Run history</div>
+  <div id="exp-list" class="space-y-2"></div>
+</div>
+
+<!-- Log tail -->
+<div class="card p-4">
+  <div class="flex items-center justify-between mb-3">
+    <div class="text-xs text-slate-500 uppercase tracking-wider">Training log</div>
+    <button onclick="document.getElementById('log-box').scrollTop=9999" class="text-xs text-slate-600 hover:text-slate-400">↓ bottom</button>
+  </div>
+  <div id="log-box" class="overflow-y-auto" style="max-height: 240px;">
+    <div id="log-lines"></div>
+  </div>
+</div>
+
+<div class="text-center text-xs text-slate-700 mt-4 pb-4">
+  Last updated: <span id="last-updated">—</span>
+</div>
+
+<script>
+const REFRESH_MS = 5000;
+let lossChart, accChart;
+
+// Chart defaults
+Chart.defaults.color = '#64748b';
+Chart.defaults.borderColor = '#1e1e2e';
+const CHART_OPTS = (label, color) => ({
+  type: 'line',
+  data: { labels: [], datasets: [{ label, data: [], borderColor: color, backgroundColor: color + '20',
+    borderWidth: 2, pointRadius: 2, pointHoverRadius: 4, fill: true, tension: 0.3 }] },
+  options: {
+    responsive: true, maintainAspectRatio: false, animation: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { grid: { color: '#1e1e2e' }, ticks: { maxTicksLimit: 8, font: { size: 10 } } },
+      y: { grid: { color: '#1e1e2e' }, ticks: { font: { size: 10 } } }
+    }
+  }
+});
+
+function initCharts() {
+  lossChart = new Chart(document.getElementById('loss-chart'), CHART_OPTS('Loss', '#fb923c'));
+  accChart  = new Chart(document.getElementById('acc-chart'),  CHART_OPTS('Accuracy %', '#4ade80'));
+}
+
+function updateChart(chart, labels, data) {
+  chart.data.labels = labels;
+  chart.data.datasets[0].data = data;
+  chart.update('none');
+}
+
+function fmt_time(secs) {
+  if (!secs && secs !== 0) return '—';
+  const m = Math.floor(secs / 60), s = secs % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+function fmt_mb(mb) {
+  return mb >= 1024 ? `${(mb/1024).toFixed(1)}G` : `${mb}M`;
+}
+
+function colorClass(val, low, high) {
+  if (val === null || val === undefined) return 'text-slate-400';
+  if (val >= high) return 'text-green-400';
+  if (val >= low)  return 'text-orange-400';
+  return 'text-red-400';
+}
+
+function classifyLogLine(line) {
+  if (/--- Step \d+/.test(line)) return 'step';
+  if (/GRPO Loss/.test(line)) return 'loss';
+  if (/Rollout accuracy/.test(line)) return 'acc';
+  if (/⏭️|too easy|too hard/.test(line)) return 'skip';
+  if (/Traceback|Error|crash/i.test(line)) return 'crash';
+  if (/🌱|Seed problem/.test(line)) return 'seed';
+  return '';
+}
+
+function renderLog(lines) {
+  const box = document.getElementById('log-lines');
+  const atBottom = document.getElementById('log-box').scrollTop + document.getElementById('log-box').clientHeight >= document.getElementById('log-box').scrollHeight - 10;
+  box.innerHTML = lines.filter(l => l.trim()).map(l => {
+    const cls = classifyLogLine(l);
+    const escaped = l.replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return `<div class="log-line ${cls}">${escaped}</div>`;
+  }).join('');
+  if (atBottom) document.getElementById('log-box').scrollTop = 9999;
+}
+
+function renderExperiments(exps) {
+  const el = document.getElementById('exp-list');
+  if (!exps.length) { el.innerHTML = '<p class="text-xs text-slate-600">No runs yet</p>'; return; }
+  el.innerHTML = exps.map(e => {
+    const acc = e.accuracy !== undefined ? `${(e.accuracy*100).toFixed(0)}% acc` : '';
+    const steps = e.steps !== undefined ? `${e.steps} steps` : '';
+    const loss = e.avg_loss !== undefined ? `loss ${e.avg_loss.toFixed(1)}` : '';
+    const elapsed = e.elapsed !== undefined ? fmt_time(Math.round(e.elapsed)) : '';
+    return `<div class="flex items-center justify-between py-1.5 border-b border-slate-800 last:border-0">
+      <span class="text-sm font-mono text-slate-300">${e.name}</span>
+      <div class="flex gap-2 text-xs text-slate-500">${[steps, loss, acc, elapsed].filter(Boolean).join(' · ')}</div>
+    </div>`;
+  }).join('');
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/status');
+    const d = await res.json();
+
+    // Status pill
+    const pill = document.getElementById('status-pill');
+    const proc = d.process;
+    const cur = d.current;
+
+    if (cur.crashed) {
+      pill.className = 'pill pill-red';
+      pill.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-red-400"></span> Crashed';
+    } else if (cur.completed) {
+      pill.className = 'pill pill-gray';
+      pill.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span> Completed';
+    } else if (proc.running) {
+      pill.className = 'pill pill-green';
+      pill.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-green-400 pulse"></span> Training';
+    } else {
+      pill.className = 'pill pill-gray';
+      pill.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span> Idle';
+    }
+
+    // GPU stats
+    const gpu = d.gpu;
+    document.getElementById('gpu-util').textContent = gpu.gpu_util + '%';
+    document.getElementById('gpu-bar').style.width = gpu.gpu_util + '%';
+    document.getElementById('vram-used').textContent = fmt_mb(gpu.mem_used_mb);
+    document.getElementById('vram-bar').style.width = gpu.mem_pct + '%';
+    document.getElementById('gpu-temp').textContent = gpu.temp_c + '°C';
+
+    // Metrics
+    document.getElementById('step-count').textContent = cur.step || '—';
+    document.getElementById('latest-loss').textContent = cur.latest_loss !== null ? cur.latest_loss.toFixed(2) : '—';
+    document.getElementById('latest-acc').textContent = cur.latest_accuracy !== null ? cur.latest_accuracy.toFixed(0) + '%' : '—';
+    document.getElementById('time-remaining').textContent = fmt_time(cur.remaining);
+
+    // Problem card
+    if (cur.problem) {
+      document.getElementById('problem-card').classList.remove('hidden');
+      document.getElementById('current-problem').textContent = cur.problem;
+      document.getElementById('current-domain').textContent = cur.domain || '';
+    }
+
+    // Charts
+    const chart = d.chart;
+    if (chart.steps.length) {
+      updateChart(lossChart, chart.steps, chart.losses);
+      updateChart(accChart, chart.steps, chart.accuracies);
+    }
+
+    // Experiments
+    renderExperiments(d.experiments || []);
+
+    // Log
+    renderLog(d.log_tail || []);
+
+    // Timestamp
+    document.getElementById('last-updated').textContent = new Date(d.timestamp + 'Z').toLocaleTimeString();
+
+  } catch (e) {
+    document.getElementById('status-pill').className = 'pill pill-red';
+    document.getElementById('status-pill').innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-red-400"></span> Server offline';
+  }
+
+  // Countdown
+  let secs = REFRESH_MS / 1000;
+  const counter = document.getElementById('refresh-counter');
+  counter.classList.remove('hidden');
+  const t = setInterval(() => {
+    counter.textContent = (--secs) + 's';
+    if (secs <= 0) clearInterval(t);
+  }, 1000);
+}
+
+initCharts();
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>
