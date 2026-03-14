@@ -80,6 +80,19 @@
 - Does accuracy improve on math domain over time?
 - Do we hit curriculum saturation before 60 min?
 
+**Extended (steps 22-27, ~33 min in):**
+
+| Step | Accuracy | GRPO Loss | Notes |
+|------|----------|-----------|-------|
+| 22   | 50%      | 14.4      | |
+| 23   | 0%       | —         | no signal |
+| 24   | 0%       | —         | no signal |
+| 25   | 0%       | —         | no signal |
+| 26   | 25%      | 44.3      | loss spike — normal RL variance |
+| 27   | TBD      | —         | |
+
+**Observation:** Loss is NOT consistently trending down — it spikes to 44 at step 26 after being at 14. This is normal for RL (high variance). Need 50+ training updates to see a real trend, not just 10.
+
 **Planned changes after this run:**
 - [ ] Add loss-per-step JSON tracking to results file (currently only avg)
 - [ ] Log which specific problems are being sampled (helps diagnose curriculum)
@@ -99,23 +112,30 @@
 - Raw output passed directly to `parse_verifier` (no strip_thinking)
 - Improved `parse_verifier`: scans ALL `{` positions, picks largest valid JSON
 
-**Logic domain result (v1):**
+**Logic domain result (v1 + v2 — same outcome):**
 - Generated 5066-char Python verifier on first attempt ✅
 - Verifier has 5 test examples ✅
-- Validation: **50% accuracy** ❌ (need 80%)
-- Root cause: verifier used complex `problem_type` dispatch logic that's hard to get right in one shot
+- Validation: **50% accuracy** ❌ (need 80%) — same result in both runs
+- Root cause 1: verifier uses complex `problem_type` dispatch — too many code paths, bugs in each
+- Root cause 2: Generated Python has truncated lines e.g. `str(answer).s` — code cut off mid-token
+- This suggests the verifier code itself hits max_tokens and gets truncated
 
-**Spatial domain result (v1):**
-- 11,376 chars generated ✅
-- Parse failed — JSON was embedded mid "Thinking Process:" text ❌
-- Fixed in v2 with the full-text JSON scanner
+**Spatial domain result (v2 — still generating):**
+- v1: parse failed (JSON inside "Thinking Process:" text) ❌ — fixed in v2
+- v2: parsing now works, result pending
+
+**Root cause of 50% validation:**
+Two separate issues:
+1. **Code quality**: verifier logic is too complex for one-shot generation (truth tables, nested dispatch)
+2. **Code truncation**: even at 3000 tokens, long verifier code gets cut mid-line
 
 **What Layer 2 needs:**
-1. **Simpler initial verifier design** — instead of complex dispatch, ask for ONE problem type per verifier
-2. **Multi-shot prompting** — show the model 1-2 examples of working verifiers before asking it to write one
-3. **Retry loop** — if validation < 80%, show model the failing test cases and ask it to fix the verifier
-4. **Lower validation bar initially** — 60% is enough to be useful; strict 80% gate blocks progress
-5. **Domain ordering** — start with simpler domains (counting, sequences) before spatial/logic
+1. **Constrained verifier design** — one problem type per verifier, simple input/output contract
+2. **Increased token budget** — 4000+ tokens for factory generation
+3. **Retry loop with error feedback** — show failing test cases, ask model to fix specific bugs
+4. **Multi-shot prompting** — 1-2 working verifier examples in the prompt
+5. **Domain difficulty ordering** — start with counting/sequences before spatial/logic
+6. **Lower initial validation bar** — 60% to register; 80% to "promote" to primary curriculum
 
 ---
 
