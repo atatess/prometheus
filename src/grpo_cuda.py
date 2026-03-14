@@ -217,41 +217,43 @@ class GRPOTrainer:
         return self.generate_rollouts_n(prompt, self.config.group_size)
 
     def generate_rollouts_n(self, prompt: str, n: int) -> list[str]:
-        """Generate `n` independent responses for `prompt`.
+        """Generate `n` independent responses for `prompt` via batched decoding.
 
-        The model is temporarily put in eval mode and torch.no_grad() is
-        used so no activations are stored, keeping VRAM usage low.
+        All n responses are generated in a single model.generate() call with
+        a repeated prompt, giving ~n× speedup over sequential generation.
+        The L40S has 48GB VRAM so we can afford batches of 6-8 without OOM.
         """
         messages = [{"role": "user", "content": prompt}]
         formatted = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        inputs = self.tokenizer(formatted, return_tensors="pt").to(self.device)
-        prompt_len = inputs["input_ids"].shape[1]
+        # Tokenise once, then repeat n times for batch generation
+        single = self.tokenizer(formatted, return_tensors="pt")
+        input_ids = single["input_ids"].repeat(n, 1).to(self.device)
+        attention_mask = single["attention_mask"].repeat(n, 1).to(self.device)
+        prompt_len = input_ids.shape[1]
+
+        self.model.eval()
+        with torch.no_grad():
+            output_ids = self.model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=self.config.max_new_tokens,
+                do_sample=(self.config.temperature > 0),
+                temperature=self.config.temperature if self.config.temperature > 0 else 1.0,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
 
         responses = []
-        self.model.eval()  # Disable dropout during generation.
+        for i in range(n):
+            new_tokens = output_ids[i, prompt_len:]
+            text = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
+            responses.append(text)
 
-        with torch.no_grad():
-            for i in range(n):
-                output_ids = self.model.generate(
-                    **inputs,
-                    max_new_tokens=self.config.max_new_tokens,
-                    do_sample=(self.config.temperature > 0),
-                    temperature=self.config.temperature if self.config.temperature > 0 else 1.0,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                )
-                new_tokens = output_ids[0, prompt_len:]
-                text = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
-                responses.append(text)
-
-                # Free CUDA cache every other generation.
-                if i % 2 == 1:
-                    torch.cuda.empty_cache()
-                    gc.collect()
-
-        self.model.train()  # Restore training mode.
+        self.model.train()
+        torch.cuda.empty_cache()
+        gc.collect()
         return responses
 
     # ------------------------------------------------------------------

@@ -31,7 +31,7 @@ def load_model_cuda(model_name: str, device: str = "cuda"):
     print(f"  Loading model weights (bfloat16) ...")
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16,   # bfloat16 — good precision / memory trade-off
+        dtype=torch.bfloat16,          # bfloat16 — good precision / memory trade-off
         device_map=device,             # put all layers on the requested GPU
         trust_remote_code=True,
     )
