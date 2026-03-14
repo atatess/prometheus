@@ -9,15 +9,21 @@ These are hand-crafted problems at the right difficulty level:
 
 from .proposer import Problem
 
-# Robust comparison test code — handles "7" vs "7.0" vs " 7 "
+# Robust comparison test code — handles "7" vs "7.0", "3." vs "3", "`42`" vs "42"
 _NUM_TEST = """
+import re as _re
 def _eq(a, b):
-    a, b = str(a).strip(), str(b).strip()
+    # Strip noise: trailing punct, backticks, surrounding quotes
+    def _clean(s):
+        s = str(s).strip().strip('`\\'"').strip()
+        s = _re.sub(r'[.,;:]+$', '', s).strip()
+        return s
+    a, b = _clean(a), _clean(b)
     if a == b: return True
     try:
         return abs(float(a) - float(b)) < 1e-6
     except: return False
-assert _eq(student_answer, expected), f"Expected {expected}, got {student_answer}"
+assert _eq(student_answer, expected), f"Expected {expected!r}, got {student_answer!r}"
 """
 
 SEED_PROBLEMS = [

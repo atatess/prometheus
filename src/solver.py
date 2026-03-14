@@ -49,6 +49,16 @@ def build_solver_prompt(problem: Problem) -> str:
     )
 
 
+def _clean_answer(s: str) -> str:
+    """Strip noise from extracted answers: trailing punctuation, backticks, brackets."""
+    import re
+    s = s.strip()
+    s = s.strip('`\'"')           # Remove surrounding backticks/quotes
+    s = re.sub(r'[.,;:]+$', '', s)  # Remove trailing punctuation
+    s = s.strip()
+    return s
+
+
 def parse_solution(raw_response: str, domain: str) -> Solution:
     """Parse the model's raw response into a Solution object."""
     import re
@@ -63,7 +73,7 @@ def parse_solution(raw_response: str, domain: str) -> Solution:
     fa_matches = re.findall(r'FINAL_ANSWER:\s*\[?([^\]\n\[]+?)\]?(?:\n|$)', text)
     if fa_matches:
         for candidate in reversed(fa_matches):
-            candidate = candidate.strip()
+            candidate = _clean_answer(candidate)
             if candidate and 'write only' not in candidate and candidate != '...':
                 return Solution(raw_response=raw_response, answer=candidate)
 
@@ -71,7 +81,7 @@ def parse_solution(raw_response: str, domain: str) -> Solution:
     answer_matches = re.findall(r'(?:^|\n)ANSWER:\s*([^\n"(]+?)(?:\n|$)', text)
     if answer_matches:
         for candidate in reversed(answer_matches):
-            candidate = candidate.strip()
+            candidate = _clean_answer(candidate)
             if candidate and candidate not in ('...', '[number]', 'X', 'the answer', 'your answer'):
                 return Solution(raw_response=raw_response, answer=candidate)
 
