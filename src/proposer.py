@@ -25,21 +25,23 @@ class Problem:
 
 # --- Prompt Templates ---
 
-MATH_PROPOSER_PROMPT = """You are a math teacher writing exam questions. Write one {difficulty} math problem about {topic} and solve it.
+MATH_PROPOSER_PROMPT = """Write one math problem about {topic} and its answer.
 
-Here are three examples of the format I want:
+Output ONLY these two lines, nothing else:
+PROBLEM: [your problem statement here]
+ANSWER: [the numeric answer here]
 
-PROBLEM: A train travels 120 km in 2 hours. What is its speed in km/h?
+Examples:
+PROBLEM: A train travels 120 km in 2 hours. What is its speed?
 ANSWER: 60
 
-PROBLEM: How many prime numbers are less than 10?
+PROBLEM: How many primes are less than 10?
 ANSWER: 4
 
 PROBLEM: What is 15% of 80?
 ANSWER: 12
 
-Now write a NEW problem about {topic} at {difficulty} difficulty. Do NOT copy the examples above. Solve it yourself.
-
+Your new {difficulty} problem about {topic}:
 PROBLEM:"""
 
 CODE_PROPOSER_PROMPT = """You are a coding challenge generator. Generate a Python programming
@@ -59,34 +61,36 @@ Output EXACTLY in this JSON format:
 Include 3-5 test cases in test_code.
 """
 
-LOGIC_PROPOSER_PROMPT = """You are a logic teacher writing puzzles. Write one {difficulty} logic or reasoning puzzle and solve it.
+LOGIC_PROPOSER_PROMPT = """Write one logic/reasoning puzzle and its answer.
 
-Here are two examples of the format I want:
+Output ONLY these two lines, nothing else:
+PROBLEM: [your puzzle here]
+ANSWER: [the numeric answer here]
 
+Examples:
 PROBLEM: Alice is twice Bob's age. Bob is 15. How old is Alice?
 ANSWER: 30
 
-PROBLEM: If it takes 3 workers 6 days to dig a ditch, how many days would 9 workers take?
+PROBLEM: 3 workers dig a ditch in 6 days. How many days for 9 workers?
 ANSWER: 2
 
-Now write a NEW puzzle at {difficulty} difficulty. Do NOT copy the examples. Solve it yourself.
-
+Your new {difficulty} puzzle:
 PROBLEM:"""
 
-SPATIAL_PROPOSER_PROMPT = """You are a geometry teacher writing problems. Write one {difficulty} spatial reasoning problem and solve it.
+SPATIAL_PROPOSER_PROMPT = """Write one spatial/geometry problem and its answer.
 
-Topics: edges/faces/vertices of 3D shapes, painted cube cuts, grid paths, symmetry.
+Output ONLY these two lines, nothing else:
+PROBLEM: [your problem here]
+ANSWER: [the numeric answer here]
 
-Here are two examples of the format I want:
-
+Examples:
 PROBLEM: How many edges does a triangular prism have?
 ANSWER: 9
 
-PROBLEM: A cube is painted red on all faces then cut into 8 equal pieces. How many pieces have exactly 3 painted faces?
+PROBLEM: A cube painted on all faces, cut into 8 equal pieces. How many pieces have exactly 3 painted faces?
 ANSWER: 8
 
-Now write a NEW problem at {difficulty} difficulty. Do NOT copy the examples. Solve it yourself.
-
+Your new {difficulty} problem:
 PROBLEM:"""
 
 # Domain registry — maps domain names to their proposer prompts

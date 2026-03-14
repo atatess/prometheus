@@ -169,8 +169,12 @@ def run_experiment(config: dict, experiment_dir: Path):
             problem = parse_proposed_problem(domain, raw_problem)
             
             if problem is None:
-                print(f"  ⚠️  Failed to parse problem, skipping")
-                continue
+                # Proposer parse failed — fall back to a random seed problem.
+                # This keeps training flowing rather than burning steps on skips.
+                # Proposer fix is tracked in GitHub issues.
+                import random as _rand
+                problem = _rand.choice(seed_pool)
+                print(f"  🔄 Proposer failed, using seed fallback [{problem.domain}]")
         
         print(f"  📝 Problem: {problem.prompt[:80]}...")
         
