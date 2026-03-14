@@ -289,16 +289,24 @@ class GRPOTrainer:
         total_loss = 0.0
         n_updates = 0
 
+        # Format prompt as chat message — MUST match exactly what generate_rollouts_n
+        # uses, otherwise log_probs are computed against the wrong context and
+        # become meaninglessly low (causing loss ≈ 30-70 instead of 0.5-3.0).
+        messages = [{"role": "user", "content": prompt}]
+        formatted_prompt = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
         for response, advantage in zip(responses, advantages):
             if advantage <= 0:
                 # Only train on above-average responses (positive advantage).
                 continue
 
-            # ---- Forward pass to get log p(completion | prompt) -----------
+            # ---- Forward pass to get log p(completion | chat_prompt) ------
             log_prob = calculate_log_probs(
                 self.model,
                 self.tokenizer,
-                prompt,
+                formatted_prompt,   # ← chat-formatted, matches generation context
                 response,
                 max_seq_len=self.config.max_seq_len,
                 device=self.device,
