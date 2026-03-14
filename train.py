@@ -1,12 +1,23 @@
 """
-Prometheus Training Loop — Self-Play via GRPO on MLX.
+Prometheus Training Loop — Self-Play via GRPO.
 
 Core loop: generate problems → solve → verify → GRPO train.
 This file can be modified by the meta-agent (autoresearch outer loop).
+
+Backend selection
+-----------------
+Set the environment variable PROMETHEUS_BACKEND=cuda to use the PyTorch/CUDA
+backend (grpo_cuda.py, model_utils_cuda.py).  On non-Darwin hosts the CUDA
+backend is chosen automatically if PROMETHEUS_BACKEND is not set.
+
+  export PROMETHEUS_BACKEND=cuda   # force CUDA
+  export PROMETHEUS_BACKEND=mlx    # force MLX (default on macOS)
 """
 
 import argparse
 import json
+import os
+import platform
 import sys
 import time
 from pathlib import Path
@@ -16,11 +27,30 @@ try:
 except ImportError:
     import tomli as tomllib
 
-import mlx.core as mx
-from mlx_lm import load
+# ---------------------------------------------------------------------------
+# Backend detection — must happen before any framework-specific imports
+# ---------------------------------------------------------------------------
+_backend_env = os.environ.get("PROMETHEUS_BACKEND", "").lower()
+if _backend_env == "cuda":
+    _USE_CUDA = True
+elif _backend_env == "mlx":
+    _USE_CUDA = False
+else:
+    # Auto-detect: use CUDA on non-macOS hosts
+    _USE_CUDA = platform.system() != "Darwin"
 
-from src.grpo import GRPOConfig, GRPOTrainer
-from src.model_utils import chat_generate, strip_thinking
+if _USE_CUDA:
+    # ---------- CUDA / PyTorch imports -------------------------------------
+    import torch
+    from src.grpo_cuda import GRPOConfig, GRPOTrainer
+    from src.model_utils_cuda import chat_generate, strip_thinking
+    from src.load_model_cuda import load_model_cuda as load
+else:
+    # ---------- MLX imports (macOS / Apple Silicon) -----------------------
+    import mlx.core as mx
+    from mlx_lm import load
+    from src.grpo import GRPOConfig, GRPOTrainer
+    from src.model_utils import chat_generate, strip_thinking
 from src.proposer import build_proposer_prompt, parse_proposed_problem
 from src.solver import build_solver_prompt, parse_solution
 from src.verifier import verify_code_task, verify_math, SandboxConfig
@@ -42,8 +72,12 @@ def run_experiment(config: dict, experiment_dir: Path):
     
     # --- Load Model ---
     model_name = config["model"]["name"]
-    print(f"\n📦 Loading model: {model_name}")
-    model, tokenizer = load(model_name)
+    print(f"\n📦 Loading model: {model_name}  (backend: {'cuda' if _USE_CUDA else 'mlx'})")
+    if _USE_CUDA:
+        # load_model_cuda returns (model, tokenizer) — same tuple as mlx_lm.load()
+        model, tokenizer = load(model_name, device="cuda")
+    else:
+        model, tokenizer = load(model_name)
     print(f"✅ Model loaded")
     
     # --- Setup GRPO ---
@@ -217,7 +251,10 @@ def run_experiment(config: dict, experiment_dir: Path):
         
         # Aggressive memory cleanup between steps
         import gc
-        mx.clear_cache()
+        if _USE_CUDA:
+            torch.cuda.empty_cache()
+        else:
+            mx.clear_cache()
         gc.collect()
         
         # Time check
