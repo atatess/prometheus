@@ -12,10 +12,29 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 def strip_thinking(text: str) -> str:
     """Strip thinking blocks from model output (pure Python, no framework deps)."""
+    # Format 1: <think>...</think> (standard Qwen3.5 instruct tags)
     if "<think>" in text and "</think>" in text:
         after = text.split("</think>")[-1].strip()
         if after:
             return after
+
+    # Format 1b: <think> present but </think> missing (cut off by max_new_tokens)
+    # Extract the partial thinking and look for an answer in it
+    if text.strip().startswith("<think>"):
+        text = text.replace("<think>", "").strip()
+
+    # Format 2: "Thinking Process:\n..." — Qwen3.5 base-style thinking
+    # Find the actual answer after the thinking block
+    if text.strip().startswith("Thinking Process:") or "Thinking Process:" in text[:50]:
+        import re
+        # Look for "Answer:" or a final standalone number/word after the thinking
+        answer_match = re.search(r'(?:^|\n)(?:Answer|Result|Therefore|So)[:\s]+(.+?)(?:\n|$)', text, re.IGNORECASE)
+        if answer_match:
+            return answer_match.group(1).strip()
+        # Last non-empty line that looks like an answer
+        lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
+        if lines:
+            return lines[-1]
     json_matches = re.findall(r'\{[^{}]*"prompt"[^{}]*\}', text)
     if json_matches:
         return json_matches[-1]
