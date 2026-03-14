@@ -162,9 +162,9 @@ def run_experiment(config: dict, experiment_dir: Path):
             # which breaks JSON/PROBLEM:/ANSWER: proposer output format.
             # Using the base model (adapter-off) keeps proposer stable.
             if _USE_CUDA:
-                from peft import PeftModel
-                if hasattr(model, 'disable_adapter'):
-                    with model.disable_adapter():
+                # disable_adapters() is PEFT's context manager (note plural)
+                if hasattr(model, 'disable_adapters'):
+                    with model.disable_adapters():
                         raw_problem = chat_generate(model, tokenizer, proposer_prompt, max_tokens=2000)
                 else:
                     raw_problem = chat_generate(model, tokenizer, proposer_prompt, max_tokens=2000)
