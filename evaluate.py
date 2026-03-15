@@ -723,9 +723,14 @@ def run_evaluation(model, tokenizer, problems: list[dict]) -> dict:
         difficulty = problem["difficulty"]
         expected = problem["answer"]
 
-        # Generate model response
+        # Generate model response — wrap with FINAL_ANSWER instruction
+        eval_prompt = (
+            f"{problem['prompt']}\n\n"
+            f"End your response with exactly this line (replace X with your answer):\n"
+            f"FINAL_ANSWER: X"
+        )
         t0 = time.time()
-        raw_response = generate_answer(model, tokenizer, problem["prompt"])
+        raw_response = generate_answer(model, tokenizer, eval_prompt)
         elapsed = time.time() - t0
 
         # Extract answer using the project's standard parser
