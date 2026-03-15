@@ -674,30 +674,31 @@ def normalize_answer(raw: str) -> str:
     return s
 
 
-def answers_match(predicted: str, expected: str) -> bool:
-    """Compare predicted vs expected answer.
-
-    Tries exact string match first, then numeric tolerance for numbers.
-    """
-    p = normalize_answer(predicted)
-    e = normalize_answer(expected)
-
+def _single_answer_match(p: str, e: str) -> bool:
+    """Compare two normalized single-value strings."""
     if p == e:
         return True
-
-    # Numeric comparison with small tolerance
     try:
         pf = float(p.replace(",", ""))
         ef = float(e.replace(",", ""))
-        return abs(pf - ef) < 0.5   # Allow rounding differences
+        return abs(pf - ef) < 0.5
     except ValueError:
-        pass
+        return False
 
-    # Multi-value answers like "8, blue" — check if all parts match
-    p_parts = [x.strip() for x in p.split(",")]
-    e_parts = [x.strip() for x in e.split(",")]
-    if len(p_parts) == len(e_parts):
-        return all(answers_match(pp, ep) for pp, ep in zip(p_parts, e_parts))
+
+def answers_match(predicted: str, expected: str) -> bool:
+    """Compare predicted vs expected answer (no recursion)."""
+    p = normalize_answer(predicted)
+    e = normalize_answer(expected)
+
+    if _single_answer_match(p, e):
+        return True
+
+    # Multi-value answers like "8, blue" — split and compare parts (non-recursive)
+    p_parts = [normalize_answer(x) for x in predicted.split(",")]
+    e_parts = [normalize_answer(x) for x in expected.split(",")]
+    if len(p_parts) == len(e_parts) and len(p_parts) > 1:
+        return all(_single_answer_match(pp, ep) for pp, ep in zip(p_parts, e_parts))
 
     return False
 

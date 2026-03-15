@@ -17,7 +17,8 @@ SOLVER_PROMPT = """Solve this problem. Think carefully, then give your answer.
 
 {format_hint}
 
-FINAL_ANSWER: [write only the answer here, nothing else]
+End your response with exactly this line (replace X with your answer):
+FINAL_ANSWER: X
 """
 
 # Code domain uses the same answer format — "what does this print?" = numeric answer.
